@@ -1,31 +1,21 @@
-export const securityConfig = {
-    allowedOperators: [
-      "eq", "ne", "gt", "gte",
-      "lt", "lte", "in", "nin",
-      "regex", "exists", "size","or","and"
-    ],
-  
-    forbiddenFields: [
-      "password",
-    ],
-  
-    accessLevels: {
-      guest: {
-        maxLimit: 50,
-        allowedPopulate: ["*"]
-      },
-      user: {
-        maxLimit: 100,
-        allowedPopulate: ["*"]
-      },
-      admin: {
-        maxLimit: 1000,
-        allowedPopulate: ["*"]
-      },
-      superAdmin: {
-        maxLimit: 1000,
-        allowedPopulate: ["*"]
-      },
+import path from "path";
+import { fileURLToPath } from "url";
+import { securityConfig as defaultConfig } from "./security-default-config.js";
 
-    }
-  };
+let userConfig = {};
+
+try {
+  const userPath = path.resolve(process.cwd(), "security-config.js");
+  userConfig = (await import(userPath))?.securityConfig || {};
+} catch (err) {
+  // کاربر security-config نداشت، مشکلی نیست
+}
+
+export const securityConfig = {
+  ...defaultConfig,
+  ...userConfig,
+  accessLevels: {
+    ...defaultConfig.accessLevels,
+    ...(userConfig.accessLevels || {}),
+  },
+};
