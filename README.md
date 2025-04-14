@@ -10,7 +10,7 @@ This repository provides a robust, feature-rich, and secure solution for buildin
 
 1. [Installation & Setup](#installation--setup)
 2. [Overview](#overview)
-3. [VantaApi Class Methods](#VantaApi-class-methods)
+3. [ApiFeatures Class Methods](#ApiFeatures-class-methods)
    - [filter()](#filter)
    - [sort()](#sort)
    - [limitFields()](#limitfields)
@@ -54,7 +54,7 @@ npm install --save-dev jest
 
 ## Overview
 
-The **VantaApi** class processes incoming query parameters and progressively builds an aggregation pipeline. The package supports:
+The **ApiFeatures** class processes incoming query parameters and progressively builds an aggregation pipeline. The package supports:
 
 - **Advanced filtering, sorting, and field selection.**
 - **Pagination with defaults** (defaults to page 1 and limit 10 if not provided), with the maximum limit based on the user's role.
@@ -67,7 +67,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
 ---
 
-## VantaApi Class Methods
+## ApiFeatures Class Methods
 
 ### filter()
 - **Description:**  
@@ -76,7 +76,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
   ```javascript
   // URL: /api/products?status=active&price[gte]=100
-  const features = new VantaApi(Product, req.query);
+  const features = new ApiFeatures(Product, req.query);
   features.filter();
   // Pipeline adds: { $match: { status: "active", price: { $gte: 100 }, isActive: true } }
   ```
@@ -88,7 +88,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
   ```javascript
   // URL: /api/products?sort=-price,createdAt
-  const features = new VantaApi(Product, req.query);
+  const features = new ApiFeatures(Product, req.query);
   features.sort();
   // Pipeline adds: { $sort: { price: -1, createdAt: 1 } }
   ```
@@ -100,7 +100,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
   ```javascript
   // URL: /api/products?fields=name,price,category,password
-  const features = new VantaApi(Product, req.query);
+  const features = new ApiFeatures(Product, req.query);
   features.limitFields();
   // Pipeline adds: { $project: { name: 1, price: 1, category: 1 } }
   ```
@@ -112,7 +112,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
   ```javascript
   // URL: /api/products?page=2&limit=20
-  const features = new VantaApi(Product, req.query, "user");
+  const features = new ApiFeatures(Product, req.query, "user");
   features.paginate();
   // Pipeline adds: { $skip: 20 } and { $limit: 20 }
   ```
@@ -128,7 +128,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
     ```javascript
     // URL: /api/products?populate=category,brand
-    const features = new VantaApi(Product, req.query);
+    const features = new ApiFeatures(Product, req.query);
     features.populate();
     ```
 
@@ -136,7 +136,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
     ```javascript
     const populateOptions = { path: "category", select: "name description" };
-    const features = new VantaApi(Product, req.query);
+    const features = new ApiFeatures(Product, req.query);
     features.populate(populateOptions);
     ```
 
@@ -148,7 +148,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
       { path: "category", select: "name description" },
       { path: "category", select: "name", populate: { path: "subCategory", select: "title" } }
     ];
-    const features = new VantaApi(Product, req.query, "admin");
+    const features = new ApiFeatures(Product, req.query, "admin");
     features.populate(populateArray);
     ```
 
@@ -159,7 +159,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 
   ```javascript
   const manualFilter = { category: "electronics" };
-  const features = new VantaApi(Product, { status: "active" });
+  const features = new ApiFeatures(Product, { status: "active" });
   features.addManualFilters(manualFilter).filter();
   ```
 
@@ -169,7 +169,7 @@ The **VantaApi** class processes incoming query parameters and progressively bui
 - **Usage Example:**
 
   ```javascript
-  const features = new VantaApi(Product, req.query);
+  const features = new ApiFeatures(Product, req.query);
   const result = await features
     .filter()
     .sort()
@@ -276,11 +276,11 @@ This middleware sets the appropriate HTTP status code and JSON error message whe
 ### Example 1: Basic Query
 
 ```javascript
-import VantaApi from "./api-features.js";
+import ApiFeatures from "./api-features.js";
 import Product from "./models/product.js";
 
 // URL: /api/products?status=active&price[gte]=100&sort=-price,createdAt&fields=name,price,category&page=1&limit=10&populate=category,brand
-const features = new VantaApi(Product, req.query, "user");
+const features = new ApiFeatures(Product, req.query, "user");
 const result = await features
   .filter()
   .sort()
@@ -298,7 +298,7 @@ console.log(result);
 ```javascript
 const query = { status: "active" };
 const manualFilter = { category: "electronics" };
-const features = new VantaApi(Product, query, "user");
+const features = new ApiFeatures(Product, query, "user");
 features.addManualFilters(manualFilter).filter();
 const result = await features.execute();
 console.log(result);
@@ -312,7 +312,7 @@ const populateArray = [
   { path: "category", select: "name description" },
   { path: "category", select: "name", populate: { path: "subCategory", select: "title" } }
 ];
-const features = new VantaApi(Product, req.query, "admin");
+const features = new ApiFeatures(Product, req.query, "admin");
 const result = await features.populate(populateArray).execute();
 console.log(result);
 ```
@@ -335,7 +335,7 @@ GET /api/products?
 
 ```javascript
 // URL: /api/products?status=active
-const features = new VantaApi(Product, req.query);
+const features = new ApiFeatures(Product, req.query);
 const result = await features
   .filter() // Defaults to page 1 and limit 10
   .execute();
