@@ -258,25 +258,73 @@ These configurations are applied automatically in methods such as `filter()`, `p
 
 ## Error Handling Middleware
 
-A dedicated error-handling middleware is available to centralize error responses:
+Vanta-API provides a centralized error handling system featuring three components:
+
+### 1. handleError
+
+**Purpose:**  
+A custom error class that extends the native JavaScript `Error`.  
+It adds:
+- **`statusCode`:** HTTP status code.
+- **`status`:** Determines if the error is a `"fail"` (client error) or `"error"` (server error).
+- **`isOperational`:** Flags if the error is an expected operational error.
+- **Stack Trace:** Captures the call stack for easier debugging.
+
+**Usage Example in an Async Function:**
+
+Inside an asynchronous function wrapped by **catchAsync**, you can use:
 
 ```javascript
-import catchError from "./errorHandler.js";
-
-// In your Express app:
-// app.use(catchError);
+// Inside your async route handler
+if (someConditionFails) {
+  return next(new handleError("Custom error message", 400));
+}
 ```
 
-This middleware sets the appropriate HTTP status code and JSON error message when an error occurs.
+### 2. catchAsync
+
+**Purpose:**  
+A helper function that wraps asynchronous route handlers.  
+It automatically catches any thrown errors and forwards them via `next()`, avoiding repetitive try/catch blocks.
+
+**Usage Example:**
+
+```javascript
+app.get("/example", catchAsync(async (req, res, next) => {
+  // Your async logic here
+  // If an error occurs, use handleError as shown above
+  res.status(200).json({ data: "Success" });
+}));
+```
+
+### 3. catchError
+
+**Purpose:**  
+An Express middleware that catches any error passed along (either from synchronous or asynchronous routes).  
+It sets the appropriate HTTP status and returns a JSON response containing the error’s status and message.
+
+**Usage Example:**
+
+```javascript
+// At the end of your middleware stack:
+app.use(catchError);
+```
+
+---
+
 
 ---
 
 ## Full Examples
 
 ### Example 1: Basic Query
+To import the package along with the error handling components, use:
 
 ```javascript
-import ApiFeatures from "./api-features.js";
+import ApiFeatures, { handleError, catchAsync, catchError } from "vanta-api";
+```
+
+```javascript
 import Product from "./models/product.js";
 
 // URL: /api/products?status=active&price[gte]=100&sort=-price,createdAt&fields=name,price,category&page=1&limit=10&populate=category,brand
@@ -362,9 +410,30 @@ console.log(result);
   Integrated advanced logging using winston and centralized error handling with a custom error class and middleware.
 - **Performance Optimizations:**  
   Supports aggregation cursor for large datasets and optimizes aggregation pipelines for efficient resource usage.
+  
+- **ApiFeatures:**  
+  Provides advanced query capabilities such as filtering, sorting, pagination, and document population for your MongoDB data.
+
+- **Error Handling Components:**
+  - **handleError:**  
+    Throw consistent, structured errors with custom messages and status codes.
+  - **catchAsync:**  
+    Wrap asynchronous route handlers to automatically propagate errors.
+  - **catchError:**  
+    Centralized middleware to catch and respond to errors uniformly.
+
+- **Importing:**  
+  Use the following statement to access all features:
+
+  ```javascript
+  import ApiFeatures, { handleError, catchAsync, catchError } from "vanta-api";
+  ```
+
+By following these guidelines, you can integrate and use Vanta-API for advanced, secure query handling and robust error management in your Node.js/Express projects.
 
 ---
 
 VantaApi provides a complete solution for integrating powerful, secure, and customizable query capabilities into any Node.js/MongoDB project.
 
 ---
+

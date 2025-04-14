@@ -1,12 +1,12 @@
 {
   "name": "vanta-api",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Advanced API features and security configuration for Node.js/MongoDB.",
-  "main": "src/api-features.js",
+  "main": "index.js",
   "scripts": {
     "postinstall": "node bin/create-security-config.js",
     "test": "jest",
-    "start": "node src/api-features.js"
+    "start": "node index.js"
   },
   "keywords": [
     "api",
