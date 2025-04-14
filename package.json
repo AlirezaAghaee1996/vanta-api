@@ -1,0 +1,29 @@
+{
+  "name": "apex-api",
+  "version": "1.0.0",
+  "description": "Advanced API features and security configuration for Node.js/MongoDB.",
+  "main": "src/api-features.js",
+  "scripts": {
+    "postinstall": "node bin/create-security-config.js",
+    "test": "jest",
+    "start": "node src/api-features.js"
+  },
+  "keywords": [
+    "api",
+    "mongodb",
+    "mongoose",
+    "aggregation",
+    "security",
+    "nodejs"
+  ],
+  "author": "Alireza Aghaee",
+  "license": "MIT",
+  "dependencies": {
+    "mongoose": "^7.0.0",
+    "winston": "^3.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "type": "module"
+}
