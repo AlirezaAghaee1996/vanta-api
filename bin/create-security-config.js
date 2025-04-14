@@ -4,7 +4,7 @@ import { join } from 'path';
 
 // Define the target path for the security-config file.
 // This example creates it in the current working directory.
-const configPath = join(process.cwd(), 'security-config.js');
+const configPath = join(process.env.INIT_CWD || process.cwd(), 'security-config.js');
 
 // If the file does not exist, create it with default content.
 if (!existsSync(configPath)) {
