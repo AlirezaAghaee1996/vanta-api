@@ -1,4 +1,3 @@
-// api-features.js
 import mongoose from "mongoose";
 import winston from "winston";
 import { securityConfig } from "./config.js";
@@ -170,8 +169,6 @@ export class ApiFeatures {
       });
     });
   
-    // پشتیبانی از nested populate: در صورت نیاز، منطق تو در تو را می‌توانید اینجا اضافه کنید.
-  
     return this;
   }
   
@@ -184,11 +181,9 @@ export class ApiFeatures {
 
   async execute(options = {}) {
     try {
-      // انتخاب حالت cursor در مواقع پردازش داده‌های حجیم
       if (options.useCursor === true) {
         this.useCursor = true;
       }
-      // اجرای موازی pipeline‌های شمارش و داده
       const [countResult, dataResult] = await Promise.all([
         this.Model.aggregate([...this.countPipeline, { $count: "total" }]),
         (this.useCursor
@@ -258,7 +253,22 @@ export class ApiFeatures {
 
   #sanitizeNestedObjects(obj) {
     return Object.entries(obj).reduce((acc, [key, value]) => {
-      if (typeof value === "object" && !Array.isArray(value)) {
+      // Handle ObjectId fields with nested operators
+      if (key.endsWith("Id") && typeof value === "object" && !Array.isArray(value)) {
+        const sanitizedObj = {};
+        for (const [op, val] of Object.entries(value)) {
+          if (["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"].includes(op) && mongoose.isValidObjectId(val)) {
+            sanitizedObj[op] = new mongoose.Types.ObjectId(val);
+          } else if (["$in", "$nin"].includes(op) && Array.isArray(val)) {
+            sanitizedObj[op] = val
+              .filter(v => mongoose.isValidObjectId(v))
+              .map(v => new mongoose.Types.ObjectId(v));
+          } else {
+            sanitizedObj[op] = val;
+          }
+        }
+        acc[key] = sanitizedObj;
+      } else if (typeof value === "object" && !Array.isArray(value)) {
         acc[key] = this.#sanitizeNestedObjects(value);
       } else {
         acc[key] = this.#sanitizeValue(key, value);
@@ -274,7 +284,7 @@ export class ApiFeatures {
     if (typeof value === "string") {
       if (value === "true") return true;
       if (value === "false") return false;
-      if (/^\d+$/.test(value)) return parseInt(value);
+      if (/^\d+$/.test(value)) return parseInt(value, 10);
     }
     return value;
   }
