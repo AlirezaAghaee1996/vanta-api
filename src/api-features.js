@@ -3,7 +3,6 @@ import winston from "winston";
 import { securityConfig } from "./config.js";
 import HandleERROR from "./handleError.js";
 
-// تنظیم logger با winston
 const logger = winston.createLogger({
   level: "info",
   format: winston.format.combine(
@@ -21,7 +20,6 @@ export class ApiFeatures {
     this.pipeline = [];
     this.countPipeline = [];
     this.manualFilters = {};
-    // انتخاب استفاده از cursor برای پردازش داده‌های حجیم
     this.useCursor = false;
     this.#initialSanitization();
   }
@@ -33,7 +31,6 @@ export class ApiFeatures {
     const safeFilters = this.#applySecurityFilters(mergedFilters);
 
     if (Object.keys(safeFilters).length > 0) {
-      // اضافه کردن فیلتر به ابتدای pipeline جهت بهبود عملکرد
       this.pipeline.push({ $match: safeFilters });
       this.countPipeline.push({ $match: safeFilters });
     }
