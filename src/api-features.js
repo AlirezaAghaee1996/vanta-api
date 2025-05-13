@@ -134,11 +134,11 @@ export class ApiFeatures {
         lookupStage = {
           $lookup: {
             from: collection,
-            let: { localField: `$${field}` },
+            let: { localId: `$${field}` },
             pipeline: [
               {
                 $match: {
-                  $expr: { $eq: ["$_id", "$$localField"] }
+                  $expr: { $eq: ["$_id", "$$localId"] }
                 }
               },
               { $project: projection }
@@ -292,13 +292,8 @@ export class ApiFeatures {
       throw new HandleERROR(`Invalid populate field: ${field}`, 400);
     }
 
-    const refModel = mongoose.model(schemaPath.options.ref);
-    if (refModel.schema.options.restricted && this.userRole !== "admin") {
-      throw new HandleERROR(`Unauthorized to populate ${field}`, 403);
-    }
-
     return {
-      collection: refModel.collection.name,
+      collection:  schemaPath.options.ref.toLowerCase()+'s',
       isArray: schemaPath.instance === "Array"
     };
   }
