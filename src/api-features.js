@@ -1,8 +1,10 @@
 import mongoose from "mongoose";
 import winston from "winston";
-import { securityConfig } from "./config.js";
+import pluralize from "pluralize";
 import HandleERROR from "./handleError.js";
+import { securityConfig } from "./config.js";
 
+// Logger setup
 const logger = winston.createLogger({
   level: "info",
   format: winston.format.combine(
@@ -13,338 +15,220 @@ const logger = winston.createLogger({
 });
 
 export class ApiFeatures {
-  constructor(model, query, userRole = "guest") {
-    this.Model = model;
+  constructor(model, query = {}, userRole = "guest") {
+    this.model = model;
     this.query = { ...query };
     this.userRole = userRole;
+
     this.pipeline = [];
     this.countPipeline = [];
     this.manualFilters = {};
     this.useCursor = false;
-    this.#initialSanitization();
+
+    this._sanitization();
   }
 
   // ---------- Core Methods ----------
-  filter() {
-    const queryFilters = this.#parseQueryFilters();
-    const mergedFilters = { ...queryFilters, ...this.manualFilters };
-    const safeFilters = this.#applySecurityFilters(mergedFilters);
 
-    if (Object.keys(safeFilters).length > 0) {
-      this.pipeline.push({ $match: safeFilters });
-      this.countPipeline.push({ $match: safeFilters });
+  filter() {
+    // Parse and sanitize both query and manual filters
+    const queryFilters = this._parseQueryFilters();
+    const manual = this._sanitizeFilters(this.manualFilters);
+    const merged = { ...queryFilters, ...manual };
+    const safe = this._applySecurityFilters(merged);
+
+    if (Object.keys(safe).length) {
+      this.pipeline.push({ $match: safe });
+      this.countPipeline.push({ $match: safe });
     }
     return this;
   }
 
   sort() {
-    if (this.query.sort) {
-      const sortObject = this.query.sort.split(",").reduce((acc, field) => {
-        const [key, order] = field.startsWith("-")
-          ? [field.slice(1), -1]
-          : [field, 1];
-        acc[key] = order;
-        return acc;
-      }, {});
-      this.pipeline.push({ $sort: sortObject });
+    if (!this.query.sort) return this;
+    const parts = this.query.sort.split(",");
+    const validFields = Object.keys(this.model.schema.paths);
+    const sortObj = {};
+
+    for (const part of parts) {
+      const dir = part.startsWith("-") ? -1 : 1;
+      const key = part.replace(/^[-+]/, "");
+      if (validFields.includes(key)) sortObj[key] = dir;
     }
+
+    if (Object.keys(sortObj).length) this.pipeline.push({ $sort: sortObj });
     return this;
   }
 
   limitFields() {
-    if (this.query.fields) {
-      const allowedFields = this.query.fields
-        .split(",")
-        .filter((f) => !securityConfig.forbiddenFields.includes(f))
-        .reduce((acc, curr) => ({ ...acc, [curr]: 1 }), {});
+    if (!this.query.fields) return this;
+    const validFields = Object.keys(this.model.schema.paths).filter(f => !securityConfig.forbiddenFields.includes(f));
+    const project = {};
 
-      this.pipeline.push({ $project: allowedFields });
-    }
+    this.query.fields.split(",").forEach(f => {
+      if (validFields.includes(f)) project[f] = 1;
+    });
+
+    if (Object.keys(project).length) this.pipeline.push({ $project: project });
     return this;
   }
 
   paginate() {
-    const { maxLimit } = securityConfig.accessLevels[this.userRole] || {
-      maxLimit: 100,
-    };
+    const { maxLimit } = securityConfig.accessLevels[this.userRole] || { maxLimit: 100 };
     const page = Math.max(parseInt(this.query.page, 10) || 1, 1);
-    const limit = Math.min(parseInt(this.query.limit, 10) || 10, maxLimit);
+    const lim = Math.min(Math.max(parseInt(this.query.limit, 10) || 10, 1), maxLimit);
 
-    this.pipeline.push({ $skip: (page - 1) * limit }, { $limit: limit });
+    this.pipeline.push({ $skip: (page - 1) * lim }, { $limit: lim });
     return this;
   }
 
   populate(input = "") {
-    let populateOptions = [];
+    // Build list from input and query.populate
+    let list = [];
+    const raw = Array.isArray(input) ? input : [input];
+    if (this.query.populate) raw.push(...this.query.populate.split(","));
 
-    if (Array.isArray(input)) {
-      input.forEach((item) => {
-        if (typeof item === "object" && item.path) {
-          populateOptions.push(item);
-        } else if (typeof item === "string") {
-          populateOptions.push(item);
-        }
-      });
-    } else if (typeof input === "object" && input.path) {
-      populateOptions.push(input);
-    } else if (typeof input === "string" && input.trim().length > 0) {
-      input
-        .split(",")
-        .filter(Boolean)
-        .forEach((item) => {
-          populateOptions.push(item.trim());
-        });
-    }
-
-    if (this.query.populate) {
-      this.query.populate
-        .split(",")
-        .filter(Boolean)
-        .forEach((item) => {
-          populateOptions.push(item.trim());
-        });
-    }
-
-    const uniqueMap = new Map();
-    populateOptions.forEach((item) => {
-      if (typeof item === "object" && item.path) {
-        uniqueMap.set(item.path, item);
-      } else if (typeof item === "string") {
-        uniqueMap.set(item, item);
-      }
+    raw.forEach(item => {
+      if (typeof item === 'string' && item.trim()) list.push(item.trim());
+      else if (item?.path) list.push(item);
     });
-    const uniquePopulateOptions = Array.from(uniqueMap.values());
 
-    uniquePopulateOptions.forEach((option) => {
-      let field,
-        projection = {};
-      if (typeof option === "object") {
-        field = option.path;
-        if (option.select) {
-          option.select.split(" ").forEach((fieldName) => {
-            if (fieldName) projection[fieldName.trim()] = 1;
-          });
-        }
-      } else if (typeof option === "string") {
-        field = option;
-      }
-
-      field = field.trim();
-      const { collection, isArray } = this.#getCollectionInfo(field);
-
-      let lookupStage = {};
-      if (Object.keys(projection).length > 0) {
-        lookupStage = {
-          $lookup: {
-            from: collection,
-            let: { localId: `$${field}` },
-            pipeline: [
-              {
-                $match: {
-                  $expr: { $eq: ["$_id", "$$localId"] },
-                },
-              },
-              { $project: projection },
-            ],
-            as: field,
-          },
-        };
-      } else {
-        lookupStage = {
-          $lookup: {
-            from: collection,
-            localField: field,
-            foreignField: "_id",
-            as: field,
-          },
-        };
-      }
-
-      this.pipeline.push(lookupStage);
-      this.pipeline.push({
-        $unwind: {
-          path: `$${field}`,
-          preserveNullAndEmptyArrays: true,
-        },
-      });
+    // Deduplicate
+    const map = new Map();
+    list.forEach(opt => {
+      const key = typeof opt === 'string' ? opt : opt.path;
+      map.set(key, opt);
     });
+
+    // Enforce role-based populate
+    const allowed = securityConfig.accessLevels[this.userRole]?.allowedPopulate || [];
+    const final = [];
+    map.forEach((opt, key) => {
+      if (allowed.includes('*') || allowed.includes(key)) final.push(opt);
+    });
+
+    // Apply lookups
+    for (const opt of final) {
+      const field = typeof opt === 'string' ? opt : opt.path;
+      const proj = typeof opt === 'object' && opt.select
+        ? opt.select.split(' ').reduce((a, f) => { a[f]=1; return a; }, {})
+        : {};
+
+      const { collection } = this._getCollectionInfo(field);
+      const lookup = proj && Object.keys(proj).length
+        ? { from: collection, let: { id: `$${field}` }, pipeline: [ { $match: { $expr: { $eq: ['$_id','$$id'] } } }, { $project: proj } ], as: field }
+        : { from: collection, localField: field, foreignField: '_id', as: field };
+
+      this.pipeline.push({ $lookup: lookup });
+      this.pipeline.push({ $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: true } });
+    }
 
     return this;
   }
 
   addManualFilters(filters) {
-    if (filters) {
-      this.manualFilters = { ...this.manualFilters, ...filters };
-    }
+    if (filters) this.manualFilters = { ...this.manualFilters, ...filters };
     return this;
   }
 
   async execute(options = {}) {
     try {
-      if (options.useCursor === true) {
-        this.useCursor = true;
-      }
-      const [countResult, dataResult] = await Promise.all([
-        this.Model.aggregate([...this.countPipeline, { $count: "total" }]),
-        this.useCursor
-          ? this.Model.aggregate(this.pipeline)
-              .cursor({ batchSize: 100 })
-              .exec()
-          : this.Model.aggregate(this.pipeline)
-              .allowDiskUse(options.allowDiskUse || false)
-              .readConcern("majority"),
-      ]);
-
-      const count = countResult[0]?.total || 0;
-      let data = [];
-      if (this.useCursor) {
-        const cursor = dataResult;
-        for await (const doc of cursor) {
-          data.push(doc);
-        }
-      } else {
-        data = dataResult;
+      if (options.useCursor) this.useCursor = true;
+      if (options.debug) logger.info('Pipeline:', this.pipeline);
+      if (this.pipeline.length > (securityConfig.maxPipelineStages || 20)) {
+        throw new HandleERROR('Too many pipeline stages', 400);
       }
 
-      return {
-        success: true,
-        count,
-        data,
-      };
-    } catch (error) {
-      this.#handleError(error);
+      const agg = this.model.aggregate(this.pipeline)
+        .maxTimeMS(options.maxTimeMS || 10000);
+
+      const [cnt] = await this.model.aggregate([...this.countPipeline, { $count: 'total' }]);
+      const cursorOrData = this.useCursor
+        ? agg.cursor({ batchSize: 100 }).exec()
+        : agg.allowDiskUse(options.allowDiskUse || false).readConcern('majority');
+
+      const data = this.useCursor
+        ? await cursorOrData.toArray()
+        : await cursorOrData;
+
+      const result = { success: true, count: cnt?.total || 0, data };
+      if (options.projection) {
+        result.data = result.data.map(doc => {
+          const projDoc = {};
+          Object.keys(options.projection).forEach(f => {
+            if (options.projection[f]) projDoc[f] = doc[f];
+          });
+          return projDoc;
+        });
+      }
+      return result;
+    } catch (err) {
+      this._handleError(err);
     }
   }
 
-  // ---------- Security and Sanitization Methods ----------
-  #initialSanitization() {
-    ["$where", "$accumulator", "$function"].forEach((op) => {
+  // ---------- Private Helpers ----------
+
+  _sanitization() {
+    // Remove unsafe ops
+    ['$', '$where', '$accumulator', '$function'].forEach(op => {
       delete this.query[op];
-      delete this.manualFilters[op];
     });
-    ["page", "limit"].forEach((field) => {
-      if (this.query[field] && !/^\d+$/.test(this.query[field])) {
-        throw new HandleERROR(`Invalid value for ${field}`, 400);
+    // Validate numeric
+    ['page','limit'].forEach(f => {
+      if (this.query[f] && !/^[0-9]+$/.test(this.query[f])) {
+        throw new HandleERROR(`Invalid ${f}`,400);
       }
     });
   }
 
-  #parseQueryFilters() {
-    const queryObj = { ...this.query };
-    ["page", "limit", "sort", "fields", "populate"].forEach(
-      (el) => delete queryObj[el]
-    );
+  _parseQueryFilters() {
+    const obj = { ...this.query };
+    ['page','limit','sort','fields','populate'].forEach(k => delete obj[k]);
 
-    return JSON.parse(
-      JSON.stringify(queryObj).replace(
-        /\b(gte|gt|lte|lt|in|nin|eq|ne|regex|exists|size)\b/g,
-        "$$$&"
-      )
-    );
-  }
-
-  #applySecurityFilters(filters) {
-    let result = { ...filters };
-
-    securityConfig.forbiddenFields.forEach((field) => delete result[field]);
-
-    if (this.userRole !== "admin" && this.Model.schema.path("isActive")) {
-      result.isActive = true;
-      result = this.#sanitizeNestedObjects(result);
-    }
-
-    return result;
-  }
-
-  #sanitizeNestedObjects(obj) {
-    return Object.entries(obj).reduce((acc, [key, value]) => {
-      // Handle ObjectId fields with nested operators
-      if (
-        key.endsWith("Id") &&
-        typeof value === "object" &&
-        !Array.isArray(value)
-      ) {
-        const sanitizedObj = {};
-        for (const [op, val] of Object.entries(value)) {
-          if (
-            ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"].includes(op) &&
-            mongoose.isValidObjectId(val)
-          ) {
-            sanitizedObj[op] = new mongoose.Types.ObjectId(val);
-          } else if (["$in", "$nin"].includes(op) && Array.isArray(val)) {
-            sanitizedObj[op] = val
-              .filter((v) => mongoose.isValidObjectId(v))
-              .map((v) => new mongoose.Types.ObjectId(v));
-          } else {
-            sanitizedObj[op] = val;
-          }
-        }
-        acc[key] = sanitizedObj;
-      } else if (typeof value === "object" && !Array.isArray(value)) {
-        acc[key] = this.#sanitizeNestedObjects(value);
+    // Whitelist operators
+    const out = {};
+    for (const [k,v] of Object.entries(obj)) {
+      if (['or','and'].includes(k)) {
+        out[`$${k}`] = Array.isArray(v) ? v : [v];
       } else {
-        acc[key] = this.#sanitizeValue(key, value);
-      }
-      return acc;
-    }, {});
-  }
-
-  #sanitizeValue(key, value) {
-    if (key.endsWith("Id") && mongoose.isValidObjectId(value)) {
-      return new mongoose.Types.ObjectId(value);
-    }
-    if (typeof value === "string") {
-      if (value === "true") return true;
-      if (value === "false") return false;
-      if (/^\d+$/.test(value)) return parseInt(value, 10);
-    }
-    return value;
-  }
-
-  #isVowel(char) {
-    return ["a", "e", "i", "o", "u"].includes(char.toLowerCase());
-  }
-  #getCollectionName(modelName) {
-    const lowerName = modelName.toLowerCase();
-    const lastChar = lowerName.slice(-1);
-    const lastTwoChars = lowerName.slice(-2);
-
-    if (lastChar === "y") {
-      const secondLastChar = lowerName.slice(-2, -1);
-      if (!this.#isVowel(secondLastChar)) {
-        return lowerName.slice(0, -1) + "ies";
+        out[k] = typeof v === 'string' && v.includes(',')
+          ? v.split(',')
+          : v;
       }
     }
-
-    if (
-      lastTwoChars === "ch" ||
-      lastTwoChars === "sh" ||
-      lastChar === "s" ||
-      lastChar === "x" ||
-      lastChar === "z"
-    ) {
-      return lowerName + "es";
-    }
-
-    return lowerName + "s";
-  }
-  #getCollectionInfo(field) {
-    const schemaPath = this.Model.schema.path(field);
-    if (!schemaPath?.options?.ref) {
-      throw new HandleERROR(`Invalid populate field: ${field}`, 400);
-    }
-    return {
-      collection: this.#getCollectionName(schemaPath?.options?.ref),
-      isArray: schemaPath.instance === "Array",
-    };
+    return out;
   }
 
-  #handleError(error) {
-    // ثبت خطا در logger همراه با stack trace
-    logger.error(`[API Features Error]: ${error.message}`, {
-      stack: error.stack,
+  _sanitizeFilters(filters) {
+    // Simple deep clone with ObjectId and boolean parsing
+    return JSON.parse(JSON.stringify(filters), (key,val) => {
+      if (key.endsWith('Id') && mongoose.isValidObjectId(val)) return new mongoose.Types.ObjectId(val);
+      if (val === 'true') return true;
+      if (val === 'false') return false;
+      if (/^[0-9]+$/.test(val)) return parseInt(val,10);
+      return val;
     });
-    throw error;
+  }
+
+  _applySecurityFilters(filters) {
+    let res = { ...filters };
+    securityConfig.forbiddenFields.forEach(f => delete res[f]);
+    if (this.userRole !== 'admin' && this.model.schema.path('isActive')) {
+      res.isActive = true;
+    }
+    return res;
+  }
+
+  _getCollectionInfo(field) {
+    const path = this.model.schema.path(field);
+    if (!path?.options?.ref) throw new HandleERROR(`Invalid populate: ${field}`,400);
+    return { collection: pluralize(path.options.ref), isArray: path.instance==='Array' };
+  }
+
+  _handleError(err) {
+    logger.error(`[ApiFeatures] ${err.message}`, { stack: err.stack });
+    throw err;
   }
 }
 
