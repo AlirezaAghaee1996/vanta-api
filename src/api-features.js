@@ -139,7 +139,7 @@ export class ApiFeatures {
         throw new HandleERROR('Too many pipeline stages', 400);
       }
 
-     let agg = this.model.aggregate(pipeline).option({ maxTimeMS: 10000 });
+     let agg = this.model.aggregate(this.pipeline).option({ maxTimeMS: 10000 });
       const [cnt] = await this.model.aggregate([...this.countPipeline, { $count: 'total' }]);
       const cursorOrData = this.useCursor
         ? agg.cursor({ batchSize: 100 }).exec()
