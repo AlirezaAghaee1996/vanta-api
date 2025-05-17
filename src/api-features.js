@@ -62,10 +62,12 @@ export class ApiFeatures {
 
   limitFields() {
     if (!this.query.fields) return this;
-    const validFields = Object.keys(this.model.schema.paths).filter(f => !securityConfig.forbiddenFields.includes(f));
+    const validFields = Object.keys(this.model.schema.paths).filter(
+      (f) => !securityConfig.forbiddenFields.includes(f)
+    );
     const project = {};
 
-    this.query.fields.split(",").forEach(f => {
+    this.query.fields.split(",").forEach((f) => {
       if (validFields.includes(f)) project[f] = 1;
     });
 
@@ -74,9 +76,14 @@ export class ApiFeatures {
   }
 
   paginate() {
-    const { maxLimit } = securityConfig.accessLevels[this.userRole] || { maxLimit: 100 };
+    const { maxLimit } = securityConfig.accessLevels[this.userRole] || {
+      maxLimit: 100,
+    };
     const page = Math.max(parseInt(this.query.page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(this.query.limit, 10) || 10, 1), maxLimit);
+    const lim = Math.min(
+      Math.max(parseInt(this.query.limit, 10) || 10, 1),
+      maxLimit
+    );
 
     this.pipeline.push({ $skip: (page - 1) * lim }, { $limit: lim });
     return this;
@@ -88,39 +95,60 @@ export class ApiFeatures {
     const raw = Array.isArray(input) ? input : [input];
     if (this.query.populate) raw.push(...this.query.populate.split(","));
 
-    raw.forEach(item => {
-      if (typeof item === 'string' && item.trim()) list.push(item.trim());
+    raw.forEach((item) => {
+      if (typeof item === "string" && item.trim()) list.push(item.trim());
       else if (item?.path) list.push(item);
     });
 
     // Deduplicate
     const map = new Map();
-    list.forEach(opt => {
-      const key = typeof opt === 'string' ? opt : opt.path;
+    list.forEach((opt) => {
+      const key = typeof opt === "string" ? opt : opt.path;
       map.set(key, opt);
     });
 
     // Enforce role-based populate
-    const allowed = securityConfig.accessLevels[this.userRole]?.allowedPopulate || [];
+    const allowed =
+      securityConfig.accessLevels[this.userRole]?.allowedPopulate || [];
     const final = [];
     map.forEach((opt, key) => {
-      if (allowed.includes('*') || allowed.includes(key)) final.push(opt);
+      if (allowed.includes("*") || allowed.includes(key)) final.push(opt);
     });
 
     // Apply lookups
     for (const opt of final) {
-      const field = typeof opt === 'string' ? opt : opt.path;
-      const proj = typeof opt === 'object' && opt.select
-        ? opt.select.split(' ').reduce((a, f) => { a[f]=1; return a; }, {})
-        : {};
+      const field = typeof opt === 'string' ? opt.toLowerCase() : opt.path.toLowerCase();
+      const proj =
+        typeof opt === "object" && opt.select
+          ? opt.select.split(" ").reduce((a, f) => {
+              a[f] = 1;
+              return a;
+            }, {})
+          : {};
 
       const { collection } = this._getCollectionInfo(field);
-      const lookup = proj && Object.keys(proj).length
-        ? { from: collection, let: { id: `$${field}` }, pipeline: [ { $match: { $expr: { $eq: ['$_id','$$id'] } } }, { $project: proj } ], as: field }
-        : { from: collection, localField: field, foreignField: '_id', as: field };
+      const lookup =
+        proj && Object.keys(proj).length
+          ? {
+              from: collection,
+              let: { id: `$${field}` },
+              pipeline: [
+                { $match: { $expr: { $eq: ["$_id", "$$id"] } } },
+                { $project: proj },
+              ],
+              as: field,
+            }
+          : {
+              from: collection,
+              localField: field,
+              foreignField: "_id",
+              as: field,
+            };
 
       this.pipeline.push({ $lookup: lookup });
-      this.pipeline.push({ $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: true } });
+      this.pipeline.push({
+        $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: true },
+      });
     }
 
     return this;
@@ -134,16 +162,23 @@ export class ApiFeatures {
   async execute(options = {}) {
     try {
       if (options.useCursor) this.useCursor = true;
-      if (options.debug) logger.info('Pipeline:', this.pipeline);
+      if (options.debug) logger.info("Pipeline:", this.pipeline);
       if (this.pipeline.length > (securityConfig.maxPipelineStages || 20)) {
-        throw new HandleERROR('Too many pipeline stages', 400);
+        throw new HandleERROR("Too many pipeline stages", 400);
       }
 
-     let agg = this.model.aggregate(this.pipeline).option({ maxTimeMS: 10000 });
-      const [cnt] = await this.model.aggregate([...this.countPipeline, { $count: 'total' }]);
+      let agg = this.model
+        .aggregate(this.pipeline)
+        .option({ maxTimeMS: 10000 });
+      const [cnt] = await this.model.aggregate([
+        ...this.countPipeline,
+        { $count: "total" },
+      ]);
       const cursorOrData = this.useCursor
         ? agg.cursor({ batchSize: 100 }).exec()
-        : agg.allowDiskUse(options.allowDiskUse || false).readConcern('majority');
+        : agg
+            .allowDiskUse(options.allowDiskUse || false)
+            .readConcern("majority");
 
       const data = this.useCursor
         ? await cursorOrData.toArray()
@@ -151,9 +186,9 @@ export class ApiFeatures {
 
       const result = { success: true, count: cnt?.total || 0, data };
       if (options.projection) {
-        result.data = result.data.map(doc => {
+        result.data = result.data.map((doc) => {
           const projDoc = {};
-          Object.keys(options.projection).forEach(f => {
+          Object.keys(options.projection).forEach((f) => {
             if (options.projection[f]) projDoc[f] = doc[f];
           });
           return projDoc;
@@ -169,30 +204,30 @@ export class ApiFeatures {
 
   _sanitization() {
     // Remove unsafe ops
-    ['$', '$where', '$accumulator', '$function'].forEach(op => {
+    ["$", "$where", "$accumulator", "$function"].forEach((op) => {
       delete this.query[op];
     });
     // Validate numeric
-    ['page','limit'].forEach(f => {
+    ["page", "limit"].forEach((f) => {
       if (this.query[f] && !/^[0-9]+$/.test(this.query[f])) {
-        throw new HandleERROR(`Invalid ${f}`,400);
+        throw new HandleERROR(`Invalid ${f}`, 400);
       }
     });
   }
 
   _parseQueryFilters() {
     const obj = { ...this.query };
-    ['page','limit','sort','fields','populate'].forEach(k => delete obj[k]);
+    ["page", "limit", "sort", "fields", "populate"].forEach(
+      (k) => delete obj[k]
+    );
 
     // Whitelist operators
     const out = {};
-    for (const [k,v] of Object.entries(obj)) {
-      if (['or','and'].includes(k)) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (["or", "and"].includes(k)) {
         out[`$${k}`] = Array.isArray(v) ? v : [v];
       } else {
-        out[k] = typeof v === 'string' && v.includes(',')
-          ? v.split(',')
-          : v;
+        out[k] = typeof v === "string" && v.includes(",") ? v.split(",") : v;
       }
     }
     return out;
@@ -200,19 +235,20 @@ export class ApiFeatures {
 
   _sanitizeFilters(filters) {
     // Simple deep clone with ObjectId and boolean parsing
-    return JSON.parse(JSON.stringify(filters), (key,val) => {
-      if (key.endsWith('Id') && mongoose.isValidObjectId(val)) return new mongoose.Types.ObjectId(val);
-      if (val === 'true') return true;
-      if (val === 'false') return false;
-      if (/^[0-9]+$/.test(val)) return parseInt(val,10);
+    return JSON.parse(JSON.stringify(filters), (key, val) => {
+      if (key.endsWith("Id") && mongoose.isValidObjectId(val))
+        return new mongoose.Types.ObjectId(val);
+      if (val === "true") return true;
+      if (val === "false") return false;
+      if (/^[0-9]+$/.test(val)) return parseInt(val, 10);
       return val;
     });
   }
 
   _applySecurityFilters(filters) {
     let res = { ...filters };
-    securityConfig.forbiddenFields.forEach(f => delete res[f]);
-    if (this.userRole !== 'admin' && this.model.schema.path('isActive')) {
+    securityConfig.forbiddenFields.forEach((f) => delete res[f]);
+    if (this.userRole !== "admin" && this.model.schema.path("isActive")) {
       res.isActive = true;
     }
     return res;
@@ -220,8 +256,16 @@ export class ApiFeatures {
 
   _getCollectionInfo(field) {
     const path = this.model.schema.path(field);
-    if (!path?.options?.ref) throw new HandleERROR(`Invalid populate: ${field}`,400);
-    return { collection: pluralize(path.options.ref), isArray: path.instance==='Array' };
+    if (!path?.options?.ref)
+      throw new HandleERROR(`Invalid populate: ${field}`, 400);
+
+    const refModelName = path.options.ref.toLowerCase();
+    const collectionName = pluralize(refModelName);
+
+    return {
+      collection: collectionName,
+      isArray: path.instance === "Array",
+    };
   }
 
   _handleError(err) {
