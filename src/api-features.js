@@ -215,23 +215,43 @@ export class ApiFeatures {
     });
   }
 
-  _parseQueryFilters() {
-    const obj = { ...this.query };
-    ["page", "limit", "sort", "fields", "populate"].forEach(
-      (k) => delete obj[k]
-    );
+_parseQueryFilters() {
+  const obj = { ...this.query };
+  // پاک کردن پارامترهای سیستماتیک
+  ["page", "limit", "sort", "fields", "populate"].forEach(k => delete obj[k]);
 
-    // Whitelist operators
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) {
-      if (["or", "and"].includes(k)) {
-        out[`$${k}`] = Array.isArray(v) ? v : [v];
-      } else {
-        out[k] = typeof v === "string" && v.includes(",") ? v.split(",") : v;
+  const out = {};
+
+  for (const [rawKey, rawVal] of Object.entries(obj)) {
+    if (typeof rawVal === 'object' && !Array.isArray(rawVal)) {
+      out[rawKey] = {};
+      for (let [op, val] of Object.entries(rawVal)) {
+        const cleanOp = op.replace(/^\$/, '');
+        if (securityConfig.allowedOperators.includes(cleanOp)) {
+          const v = /^[0-9]+$/.test(val) ? parseInt(val, 10) : val;
+          out[rawKey][`$${cleanOp}`] = v;
+        }
       }
     }
-    return out;
+    else if (/^\w+\[\$?\w+\]$/.test(rawKey)) {
+      const [, field, op] = rawKey.match(/^(\w+)\[\$?(\w+)\]$/);
+      if (securityConfig.allowedOperators.includes(op)) {
+        const v = /^[0-9]+$/.test(rawVal) ? parseInt(rawVal, 10) : rawVal;
+        out[field] = { [`$${op}`]: v };
+      }
+    }
+    else {
+      if (typeof rawVal === "string" && rawVal.includes(",")) {
+        out[rawKey] = rawVal.split(",");
+      } else {
+        out[rawKey] = rawVal;
+      }
+    }
   }
+
+  return out;
+}
+
 
   _sanitizeFilters(filters) {
     // Simple deep clone with ObjectId and boolean parsing
