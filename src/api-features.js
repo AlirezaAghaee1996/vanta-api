@@ -117,7 +117,7 @@ export class ApiFeatures {
 
     // Apply lookups
     for (const opt of final) {
-      const field = typeof opt === 'string' ? opt.toLowerCase() : opt.path.toLowerCase();
+      const field = typeof opt === 'string' ? opt : opt.path;
       const proj =
         typeof opt === "object" && opt.select
           ? opt.select.split(" ").reduce((a, f) => {
