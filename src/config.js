@@ -8,7 +8,6 @@ try {
   const userPath = path.resolve(process.cwd(), "security-config.js");
   userConfig = (await import(userPath))?.securityConfig || {};
 } catch (err) {
-  // کاربر security-config نداشت، مشکلی نیست
 }
 
 export const securityConfig = {
