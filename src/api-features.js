@@ -313,10 +313,13 @@ export class ApiFeatures {
 
   _getCollectionInfo(field) {
     const path = this.model.schema.path(field);
-    if (!path?.options?.ref)
+    if (!path?.options?.ref && !path?.options?.type[0]?.ref)
       throw new HandleERROR(`Invalid populate: ${field}`, 400);
 
-    const refModelName = path.options.ref.toLowerCase();
+    const refModelName =
+      path?.options?.ref?.toLowerCase() ||
+      path?.options?.type[0]?.ref.toLowerCase();
+
     const collectionName = pluralize(refModelName);
 
     return {
