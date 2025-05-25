@@ -19,6 +19,7 @@
   "author": "Alireza Aghaee",
   "license": "MIT",
   "dependencies": {
+    "bson": "^6.10.3",
     "mongoose": "^7.0.0",
     "pluralize": "^8.0.0",
     "winston": "^3.0.0"

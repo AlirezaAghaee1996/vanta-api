@@ -253,17 +253,49 @@ _parseQueryFilters() {
 }
 
 
-  _sanitizeFilters(filters) {
-    // Simple deep clone with ObjectId and boolean parsing
+   _sanitizeFilters(filters) {
     return JSON.parse(JSON.stringify(filters), (key, val) => {
-      if (key.endsWith("Id") && mongoose.isValidObjectId(val))
-        return new mongoose.Types.ObjectId(val);
+      // اگر val شیئی حاوی $eq یا eq باشد و آن فیلد ObjectId معتبر باشد
+      if (
+        typeof val === 'object' &&
+        val !== null &&
+        (this.#isStrictObjectId(val['$eq']) || this.#isStrictObjectId(val['eq']))
+      ) {
+        const newVal = { ...val };
+        if (this.#isStrictObjectId(val['$eq'])) {
+          newVal['$eq'] = new mongoose.Types.ObjectId(val['$eq']);
+        }
+        if (this.#isStrictObjectId(val['eq'])) {
+          newVal['eq'] = new mongoose.Types.ObjectId(val['eq']);
+        }
+        return newVal;
+      }
+
+      // تبدیل true/false
       if (val === "true") return true;
       if (val === "false") return false;
-      if (/^[0-9]+$/.test(val)) return parseInt(val, 10);
+
+      // تبدیل عدد صحیح
+      if (typeof val === 'string' && /^[0-9]+$/.test(val)) return parseInt(val, 10);
+
+      // اگر val یک رشته است و ObjectId معتبر باشد، به ObjectId تبدیل شود
+      if (
+        typeof val === 'string' &&
+        this.#isStrictObjectId(val)
+      ) {
+        return new mongoose.Types.ObjectId(val);
+      }
+
       return val;
     });
   }
+#isStrictObjectId(id) {
+  return (
+    typeof id === 'string' &&
+    mongoose.Types.ObjectId.isValid(id) &&
+    (new mongoose.Types.ObjectId(id)).toString() === id
+  );
+}
 
   _applySecurityFilters(filters) {
     let res = { ...filters };
