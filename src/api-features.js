@@ -33,8 +33,10 @@ export class ApiFeatures {
   filter() {
     // Parse and sanitize both query and manual filters
     const queryFilters = this._parseQueryFilters();
-    const manual = this._sanitizeFilters(this.manualFilters);
-    const merged = { ...queryFilters, ...manual };
+    const merged = this._sanitizeFilters({
+      ...queryFilters,
+      ...this.manualFilters,
+    });
     const safe = this._applySecurityFilters(merged);
 
     if (Object.keys(safe).length) {
@@ -117,7 +119,7 @@ export class ApiFeatures {
 
     // Apply lookups
     for (const opt of final) {
-      const field = typeof opt === 'string' ? opt : opt.path;
+      const field = typeof opt === "string" ? opt : opt.path;
       const proj =
         typeof opt === "object" && opt.select
           ? opt.select.split(" ").reduce((a, f) => {
@@ -215,87 +217,90 @@ export class ApiFeatures {
     });
   }
 
-_parseQueryFilters() {
-  const obj = { ...this.query };
-  // پاک کردن پارامترهای سیستماتیک
-  ["page", "limit", "sort", "fields", "populate"].forEach(k => delete obj[k]);
+  _parseQueryFilters() {
+    const obj = { ...this.query };
+    // پاک کردن پارامترهای سیستماتیک
+    ["page", "limit", "sort", "fields", "populate"].forEach(
+      (k) => delete obj[k]
+    );
 
-  const out = {};
+    const out = {};
 
-  for (const [rawKey, rawVal] of Object.entries(obj)) {
-    if (typeof rawVal === 'object' && !Array.isArray(rawVal)) {
-      out[rawKey] = {};
-      for (let [op, val] of Object.entries(rawVal)) {
-        const cleanOp = op.replace(/^\$/, '');
-        if (securityConfig.allowedOperators.includes(cleanOp)) {
-          const v = /^[0-9]+$/.test(val) ? parseInt(val, 10) : val;
-          out[rawKey][`$${cleanOp}`] = v;
+    for (const [rawKey, rawVal] of Object.entries(obj)) {
+      if (typeof rawVal === "object" && !Array.isArray(rawVal)) {
+        out[rawKey] = {};
+        for (let [op, val] of Object.entries(rawVal)) {
+          const cleanOp = op.replace(/^\$/, "");
+          if (securityConfig.allowedOperators.includes(cleanOp)) {
+            const v = /^[0-9]+$/.test(val) ? parseInt(val, 10) : val;
+            out[rawKey][`$${cleanOp}`] = v;
+          }
+        }
+      } else if (/^\w+\[\$?\w+\]$/.test(rawKey)) {
+        const [, field, op] = rawKey.match(/^(\w+)\[\$?(\w+)\]$/);
+        if (securityConfig.allowedOperators.includes(op)) {
+          const v = /^[0-9]+$/.test(rawVal) ? parseInt(rawVal, 10) : rawVal;
+          out[field] = { [`$${op}`]: v };
+        }
+      } else {
+        if (typeof rawVal === "string" && rawVal.includes(",")) {
+          out[rawKey] = rawVal.split(",");
+        } else {
+          out[rawKey] = rawVal;
         }
       }
     }
-    else if (/^\w+\[\$?\w+\]$/.test(rawKey)) {
-      const [, field, op] = rawKey.match(/^(\w+)\[\$?(\w+)\]$/);
-      if (securityConfig.allowedOperators.includes(op)) {
-        const v = /^[0-9]+$/.test(rawVal) ? parseInt(rawVal, 10) : rawVal;
-        out[field] = { [`$${op}`]: v };
-      }
-    }
-    else {
-      if (typeof rawVal === "string" && rawVal.includes(",")) {
-        out[rawKey] = rawVal.split(",");
-      } else {
-        out[rawKey] = rawVal;
-      }
-    }
+
+    return out;
   }
 
-  return out;
-}
-
-
-   _sanitizeFilters(filters) {
-    return JSON.parse(JSON.stringify(filters), (key, val) => {
-      // اگر val شیئی حاوی $eq یا eq باشد و آن فیلد ObjectId معتبر باشد
+  _sanitizeFilters(filters) {
+    const resultObj = {};
+    const resualt = Object.entries(filters).map((el) => {
+      const [keyObj, val] = el;
       if (
-        typeof val === 'object' &&
-        val !== null &&
-        (this.#isStrictObjectId(val['$eq']) || this.#isStrictObjectId(val['eq']))
+        typeof val === "object" &&
+        (this.#isStrictObjectId(val["$eq"]) ||
+          this.#isStrictObjectId(val["eq"]))
       ) {
         const newVal = { ...val };
-        if (this.#isStrictObjectId(val['$eq'])) {
-          newVal['$eq'] = new mongoose.Types.ObjectId(val['$eq']);
+        if (this.#isStrictObjectId(val["$eq"])) {
+          newVal["$eq"] = new ObjectId(val["$eq"]);
         }
-        if (this.#isStrictObjectId(val['eq'])) {
-          newVal['eq'] = new mongoose.Types.ObjectId(val['eq']);
+        if (this.#isStrictObjectId(val["eq"])) {
+          newVal["eq"] = new ObjectId(val["eq"]);
         }
-        return newVal;
+        resultObj[keyObj] = newVal;
+        return;
       }
-
-      // تبدیل true/false
-      if (val === "true") return true;
-      if (val === "false") return false;
-
-      // تبدیل عدد صحیح
-      if (typeof val === 'string' && /^[0-9]+$/.test(val)) return parseInt(val, 10);
-
-      // اگر val یک رشته است و ObjectId معتبر باشد، به ObjectId تبدیل شود
-      if (
-        typeof val === 'string' &&
-        this.#isStrictObjectId(val)
-      ) {
-        return new mongoose.Types.ObjectId(val);
+      if (val === "true") {
+        resultObj[keyObj] = true;
+        return;
       }
-
-      return val;
+      if (val === "false") {
+        resultObj[keyObj] = false;
+        return;
+      }
+      if (typeof val === "string" && /^[0-9]+$/.test(val)) {
+        resultObj[keyObj] = parseInt(val, 10);
+        return;
+      }
+      if (typeof val === "string" && this.#isStrictObjectId(val)) {
+        resultObj[keyObj] = new ObjectId(val);
+        return;
+      }
+      resultObj[keyObj] = val;
     });
+    return resultObj;
   }
-#isStrictObjectId(id) {
-  return (
-    typeof id === 'string' &&
-    mongoose.Types.ObjectId.isValid(id) &&
-    (new mongoose.Types.ObjectId(id)).toString() === id
-  );
-}
+
+  #isStrictObjectId(id) {
+    return (
+      typeof id === "string" &&
+      mongoose.Types.ObjectId.isValid(id) &&
+      new mongoose.Types.ObjectId(id).toString() === id
+    );
+  }
 
   _applySecurityFilters(filters) {
     let res = { ...filters };
