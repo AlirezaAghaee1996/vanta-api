@@ -281,6 +281,10 @@ export class ApiFeatures {
         resultObj[keyObj] = false;
         return;
       }
+       if (val === "null") {
+        resultObj[keyObj] = null;
+        return;
+      }
       if (typeof val === "string" && /^[0-9]+$/.test(val)) {
         resultObj[keyObj] = parseInt(val, 10);
         return;
