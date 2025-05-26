@@ -258,6 +258,10 @@ export class ApiFeatures {
     const resultObj = {};
     const resualt = Object.entries(filters).map((el) => {
       const [keyObj, val] = el;
+      if (val === "null") {
+        resultObj[keyObj] = null;
+        return;
+      }
       if (
         typeof val === "object" &&
         (this.#isStrictObjectId(val["$eq"]) ||
@@ -281,10 +285,7 @@ export class ApiFeatures {
         resultObj[keyObj] = false;
         return;
       }
-       if (val === "null") {
-        resultObj[keyObj] = null;
-        return;
-      }
+       
       if (typeof val === "string" && /^[0-9]+$/.test(val)) {
         resultObj[keyObj] = parseInt(val, 10);
         return;
