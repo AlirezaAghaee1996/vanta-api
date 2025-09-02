@@ -91,70 +91,74 @@ export class ApiFeatures {
     return this;
   }
 
-populate(input = "") {
-  let list = [];
-  const raw = Array.isArray(input) ? input : [input];
-  if (this.query.populate) raw.push(...this.query.populate.split(","));
+  populate(input = "") {
+    let list = [];
+    const raw = Array.isArray(input) ? input : [input];
+    if (this.query.populate) raw.push(...this.query.populate.split(","));
 
-  raw.forEach((item) => {
-    if (typeof item === "string" && item.trim()) list.push(item.trim());
-    else if (item?.path) list.push(item);
-  });
+    raw.forEach((item) => {
+      if (typeof item === "string" && item.trim()) list.push(item.trim());
+      else if (item?.path) list.push(item);
+    });
 
-  const map = new Map();
-  list.forEach((opt) => {
-    const key = typeof opt === "string" ? opt : opt.path;
-    map.set(key, opt);
-  });
+    const map = new Map();
+    list.forEach((opt) => {
+      const key = typeof opt === "string" ? opt : opt.path;
+      map.set(key, opt);
+    });
 
-  const allowed =
-    securityConfig.accessLevels[this.userRole]?.allowedPopulate || [];
-  const final = [];
-  map.forEach((opt, key) => {
-    if (allowed.includes("*") || allowed.includes(key)) final.push(opt);
-  });
+    const allowed =
+      securityConfig.accessLevels[this.userRole]?.allowedPopulate || [];
+    const final = [];
+    map.forEach((opt, key) => {
+      if (allowed.includes("*") || allowed.includes(key)) final.push(opt);
+    });
 
-  for (const opt of final) {
-    const field = typeof opt === "string" ? opt : opt.path;
-    const proj =
-      typeof opt === "object" && opt.select
-        ? opt.select.split(" ").reduce((a, f) => {
-            a[f] = 1;
-            return a;
-          }, {})
-        : {};
+    for (const opt of final) {
+      const field = typeof opt === "string" ? opt : opt.path;
+      const proj =
+        typeof opt === "object" && opt.select
+          ? opt.select.split(" ").reduce(
+              (a, f) => {
+                a[f] = 1;
+                return a;
+              },
+              { _id: 1 }
+            )
+          : {};
 
-    const { collection, isArray } = this._getCollectionInfo(field);
+      const { collection, isArray } = this._getCollectionInfo(field);
 
-    const lookup =
-      proj && Object.keys(proj).length
-        ? {
-            from: collection,
-            let: { id: `$${field}` },
-            pipeline: [
-              { $match: { $expr: { $eq: ["$_id", "$$id"] } } },
-              { $project: proj },
-            ],
-            as: field,
-          }
-        : {
-            from: collection,
-            localField: field,
-            foreignField: "_id",
-            as: field,
-          };
+      const matchStage = isArray
+        ? { $match: { $expr: { $in: ["$_id", "$$id"] } } }
+        : { $match: { $expr: { $eq: ["$_id", "$$id"] } } };
 
-    this.pipeline.push({ $lookup: lookup });
+      const lookup =
+        proj && Object.keys(proj).length
+          ? {
+              from: collection,
+              let: { id: `$${field}` },
+              pipeline: [matchStage, { $project: proj }],
+              as: field,
+            }
+          : {
+              from: collection,
+              localField: field,
+              foreignField: "_id",
+              as: field,
+            };
 
-    if (!isArray) {
-      this.pipeline.push({
-        $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: true },
-      });
+      this.pipeline.push({ $lookup: lookup });
+
+      if (!isArray) {
+        this.pipeline.push({
+          $unwind: { path: `$${field}`, preserveNullAndEmptyArrays: true },
+        });
+      }
     }
-  }
 
-  return this;
-}
+    return this;
+  }
 
   addManualFilters(filters) {
     if (filters) this.manualFilters = { ...this.manualFilters, ...filters };
@@ -285,7 +289,7 @@ populate(input = "") {
         resultObj[keyObj] = false;
         return;
       }
-       
+
       if (typeof val === "string" && /^[0-9]+$/.test(val)) {
         resultObj[keyObj] = parseInt(val, 10);
         return;
