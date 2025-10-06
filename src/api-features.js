@@ -62,20 +62,45 @@ export class ApiFeatures {
     return this;
   }
 
-  limitFields() {
-    if (!this.query.fields) return this;
-    const validFields = Object.keys(this.model.schema.paths).filter(
-      (f) => !securityConfig.forbiddenFields.includes(f)
-    );
-    const project = {};
+ limitFields(input = "") {
+  const rawFields = [input, this.query.fields].filter(Boolean).join(",");
+  if (!rawFields) return this;
 
-    this.query.fields.split(",").forEach((f) => {
+  const validFields = Object.keys(this.model.schema.paths).filter(
+    (f) => !securityConfig.forbiddenFields.includes(f)
+  );
+
+  const fieldsArray = rawFields
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+
+  const includeFields = new Set();
+  const excludeFields = new Set();
+
+  fieldsArray.forEach((f) => {
+    if (f.startsWith("-")) excludeFields.add(f.slice(1));
+    else includeFields.add(f);
+  });
+
+  const project = {};
+
+  if (includeFields.size > 0) {
+    includeFields.forEach((f) => {
       if (validFields.includes(f)) project[f] = 1;
     });
-
-    if (Object.keys(project).length) this.pipeline.push({ $project: project });
-    return this;
+  } else if (excludeFields.size > 0) {
+    validFields.forEach((f) => {
+      if (!excludeFields.has(f)) project[f] = 1;
+    });
   }
+
+  if (Object.keys(project).length) {
+    this.pipeline.push({ $project: project });
+  }
+
+  return this;
+}
 
   paginate() {
     const { maxLimit } = securityConfig.accessLevels[this.userRole] || {
