@@ -15,10 +15,14 @@ const logger = winston.createLogger({
 });
 
 export class ApiFeatures {
-  constructor(model, query = {}, userRole = "guest") {
+  constructor(model, query = {}, userRole = "") {
     this.model = model;
     this.query = { ...query };
-    this.userRole = userRole;
+    if (!userRole || ! Object.keys(securityConfig.accessLevels).includes(userRole)) {
+      this.userRole = 'guest';
+    } else {
+      this.userRole = userRole;
+    }
 
     this.pipeline = [];
     this.countPipeline = [];
