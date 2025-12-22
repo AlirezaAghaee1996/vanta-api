@@ -1,6 +1,6 @@
 {
   "name": "vanta-api",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Advanced API features and security configuration for Node.js/MongoDB.",
   "main": "index.js",
   "scripts": {

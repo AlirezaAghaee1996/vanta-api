@@ -86,9 +86,7 @@ export class ApiFeatures {
     if (f.startsWith("-")) excludeFields.add(f.slice(1));
     else includeFields.add(f);
   });
-
   const project = {};
-
   if (includeFields.size > 0) {
     includeFields.forEach((f) => {
       if (validFields.includes(f)) project[f] = 1;
@@ -105,7 +103,6 @@ export class ApiFeatures {
 
   return this;
 }
-
   paginate() {
     const { maxLimit } = securityConfig.accessLevels[this.userRole] || {
       maxLimit: 100,
@@ -252,7 +249,6 @@ export class ApiFeatures {
 
   _parseQueryFilters() {
     const obj = { ...this.query };
-    // پاک کردن پارامترهای سیستماتیک
     ["page", "limit", "sort", "fields", "populate"].forEach(
       (k) => delete obj[k]
     );
@@ -343,9 +339,6 @@ export class ApiFeatures {
   _applySecurityFilters(filters) {
     let res = { ...filters };
     securityConfig.forbiddenFields.forEach((f) => delete res[f]);
-    if (this.userRole !== "admin" && this.model.schema.path("isActive")) {
-      res.isActive = true;
-    }
     return res;
   }
 
