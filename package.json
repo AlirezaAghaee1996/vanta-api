@@ -1,6 +1,6 @@
 {
   "name": "vanta-api",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Advanced API features and security configuration for Node.js/MongoDB.",
   "main": "index.js",
   "scripts": {
@@ -19,7 +19,7 @@
   "author": "Alireza Aghaee",
   "license": "MIT",
   "dependencies": {
-    "bson": "^6.10.3",
+    "bson": "^7.0.0",
     "mongoose": "^7.0.0",
     "pluralize": "^8.0.0",
     "winston": "^3.0.0"

@@ -18,8 +18,11 @@ export class ApiFeatures {
   constructor(model, query = {}, userRole = "") {
     this.model = model;
     this.query = { ...query };
-    if (!userRole || ! Object.keys(securityConfig.accessLevels).includes(userRole)) {
-      this.userRole = 'guest';
+    if (
+      !userRole ||
+      !Object.keys(securityConfig.accessLevels).includes(userRole)
+    ) {
+      this.userRole = "guest";
     } else {
       this.userRole = userRole;
     }
@@ -66,43 +69,43 @@ export class ApiFeatures {
     return this;
   }
 
- limitFields(input = "") {
-  const rawFields = [input, this.query.fields].filter(Boolean).join(",");
-  if (!rawFields) return this;
+  limitFields(input = "") {
+    const rawFields = [input, this.query.fields].filter(Boolean).join(",");
+    if (!rawFields) return this;
 
-  const validFields = Object.keys(this.model.schema.paths).filter(
-    (f) => !securityConfig.forbiddenFields.includes(f)
-  );
+    const validFields = Object.keys(this.model.schema.paths).filter(
+      (f) => !securityConfig.forbiddenFields.includes(f)
+    );
 
-  const fieldsArray = rawFields
-    .split(",")
-    .map((f) => f.trim())
-    .filter(Boolean);
+    const fieldsArray = rawFields
+      .split(",")
+      .map((f) => f.trim())
+      .filter(Boolean);
 
-  const includeFields = new Set();
-  const excludeFields = new Set();
+    const includeFields = new Set();
+    const excludeFields = new Set();
 
-  fieldsArray.forEach((f) => {
-    if (f.startsWith("-")) excludeFields.add(f.slice(1));
-    else includeFields.add(f);
-  });
-  const project = {};
-  if (includeFields.size > 0) {
-    includeFields.forEach((f) => {
-      if (validFields.includes(f)) project[f] = 1;
+    fieldsArray.forEach((f) => {
+      if (f.startsWith("-")) excludeFields.add(f.slice(1));
+      else includeFields.add(f);
     });
-  } else if (excludeFields.size > 0) {
-    validFields.forEach((f) => {
-      if (!excludeFields.has(f)) project[f] = 1;
-    });
-  }
+    const project = {};
+    if (includeFields.size > 0) {
+      includeFields.forEach((f) => {
+        if (validFields.includes(f)) project[f] = 1;
+      });
+    } else if (excludeFields.size > 0) {
+      validFields.forEach((f) => {
+        if (!excludeFields.has(f)) project[f] = 1;
+      });
+    }
 
-  if (Object.keys(project).length) {
-    this.pipeline.push({ $project: project });
-  }
+    if (Object.keys(project).length) {
+      this.pipeline.push({ $project: project });
+    }
 
-  return this;
-}
+    return this;
+  }
   paginate() {
     const { maxLimit } = securityConfig.accessLevels[this.userRole] || {
       maxLimit: 100,
@@ -316,9 +319,14 @@ export class ApiFeatures {
       }
 
       if (typeof val === "string" && /^[0-9]+$/.test(val)) {
-        resultObj[keyObj] = parseInt(val, 10);
+        if (val.length > 1 && val.startsWith("0")) {
+          resultObj[keyObj] = val; // keep leading zero
+        } else {
+          resultObj[keyObj] = parseInt(val, 10);
+        }
         return;
       }
+
       if (typeof val === "string" && this.#isStrictObjectId(val)) {
         resultObj[keyObj] = new ObjectId(val);
         return;
