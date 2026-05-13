@@ -7,20 +7,14 @@ import { ObjectId } from "bson";
 
 const logger = winston.createLogger({
   level: "info",
-  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
   transports: [new winston.transports.Console()],
 });
 
-const RESERVED_QUERY_KEYS = [
-  "page",
-  "limit",
-  "sort",
-  "fields",
-  "populate",
-  "q",
-];
-
-const LOGICAL_OPERATORS = new Set(["$and", "$or", "$nor"]);
+const RESERVED_QUERY_KEYS = ["page", "limit", "sort", "fields", "populate", "q"];
 
 export class ApiFeatures {
   constructor(model, query = {}, userRole = "") {
@@ -28,7 +22,6 @@ export class ApiFeatures {
     this.query = { ...query };
     this.pipeline = [];
     this.manualFilters = {};
-    this.searchFields = [];
     this.useCursor = false;
 
     this.userRole =
@@ -39,12 +32,12 @@ export class ApiFeatures {
 
   filter() {
     const queryFilters = this._parseQueryFilters();
-    const merged = this._deepMergeFilters(queryFilters, this.manualFilters);
-    const sanitized = this._sanitizeFilters(merged);
-    const safe = this._applySecurityFilters(sanitized);
+    const mergedFilters = this._deepMergeFilters(queryFilters, this.manualFilters);
+    const sanitizedFilters = this._sanitizeFilters(mergedFilters);
+    const safeFilters = this._applySecurityFilters(sanitizedFilters);
 
-    if (Object.keys(safe).length) {
-      this.pipeline.push({ $match: safe });
+    if (Object.keys(safeFilters).length) {
+      this.pipeline.push({ $match: safeFilters });
     }
 
     return this;
@@ -61,13 +54,7 @@ export class ApiFeatures {
   search(fields = []) {
     const q = this.query.q;
 
-    if (!q) return this;
-
-    const cleanFields = Array.isArray(fields)
-      ? fields.filter((f) => typeof f === "string" && f.trim())
-      : [];
-
-    if (!cleanFields.length) return this;
+    if (!q || !Array.isArray(fields) || !fields.length) return this;
 
     const safeQ = this._escapeRegex(String(q).trim());
 
@@ -75,9 +62,11 @@ export class ApiFeatures {
 
     this.pipeline.push({
       $match: {
-        $or: cleanFields.map((field) => ({
-          [field]: { $regex: safeQ, $options: "i" },
-        })),
+        $or: fields
+          .filter((field) => typeof field === "string" && field.trim())
+          .map((field) => ({
+            [field]: { $regex: safeQ, $options: "i" },
+          })),
       },
     });
 
@@ -88,18 +77,18 @@ export class ApiFeatures {
     if (!this.query.sort) return this;
 
     const sortObj = {};
-    const validFields = this._getValidSortableFields();
+    const validFields = new Set(Object.keys(this.model.schema.paths));
 
     String(this.query.sort)
       .split(",")
       .map((p) => p.trim())
       .filter(Boolean)
       .forEach((part) => {
-        const dir = part.startsWith("-") ? -1 : 1;
-        const key = part.replace(/^[-+]/, "");
+        const direction = part.startsWith("-") ? -1 : 1;
+        const field = part.replace(/^[-+]/, "");
 
-        if (validFields.has(key)) {
-          sortObj[key] = dir;
+        if (validFields.has(field)) {
+          sortObj[field] = direction;
         }
       });
 
@@ -117,11 +106,11 @@ export class ApiFeatures {
 
     const fields = rawFields
       .split(",")
-      .map((f) => f.trim())
+      .map((field) => field.trim())
       .filter(Boolean);
 
-    const hasInclude = fields.some((f) => !f.startsWith("-"));
-    const hasExclude = fields.some((f) => f.startsWith("-"));
+    const hasInclude = fields.some((field) => !field.startsWith("-"));
+    const hasExclude = fields.some((field) => field.startsWith("-"));
 
     if (hasInclude && hasExclude) {
       throw new HandleERROR("Cannot mix include and exclude fields", 400);
@@ -130,11 +119,11 @@ export class ApiFeatures {
     const project = {};
 
     for (const field of fields) {
-      const clean = field.replace(/^-/, "");
+      const cleanField = field.replace(/^-/, "");
 
-      if (this._isForbiddenField(clean)) continue;
+      if (this._isForbiddenField(cleanField)) continue;
 
-      project[clean] = field.startsWith("-") ? 0 : 1;
+      project[cleanField] = field.startsWith("-") ? 0 : 1;
     }
 
     if (Object.keys(project).length) {
@@ -161,7 +150,8 @@ export class ApiFeatures {
 
   populate(input = "") {
     const populateList = this._normalizePopulateInput(input);
-    const allowedPopulate = securityConfig.accessLevels?.[this.userRole]?.allowedPopulate || [];
+    const allowedPopulate =
+      securityConfig.accessLevels?.[this.userRole]?.allowedPopulate || [];
 
     for (const populateItem of populateList) {
       this._addPopulateStages({
@@ -201,8 +191,15 @@ export class ApiFeatures {
       let data;
 
       if (this.useCursor) {
-        const cursor = aggregation.cursor({ batchSize: options.batchSize || 100 });
-        data = await cursor.exec().toArray();
+        const cursor = aggregation.cursor({
+          batchSize: options.batchSize || 100,
+        });
+
+        data = [];
+
+        for await (const doc of cursor) {
+          data.push(doc);
+        }
       } else {
         data = await aggregation
           .allowDiskUse(Boolean(options.allowDiskUse))
@@ -221,7 +218,10 @@ export class ApiFeatures {
 
   _sanitization() {
     for (const key of Object.keys(this.query)) {
-      if (key.startsWith("$") || ["$where", "$accumulator", "$function"].includes(key)) {
+      if (
+        key.startsWith("$") ||
+        ["$where", "$accumulator", "$function"].includes(key)
+      ) {
         delete this.query[key];
       }
     }
@@ -295,13 +295,6 @@ export class ApiFeatures {
         const result = {};
 
         for (const [childKey, childVal] of Object.entries(node)) {
-          if (LOGICAL_OPERATORS.has(childKey)) {
-            result[childKey] = Array.isArray(childVal)
-              ? childVal.map((item) => sanitizeNode(item))
-              : childVal;
-            continue;
-          }
-
           result[childKey] = sanitizeNode(childVal, childKey);
         }
 
@@ -309,7 +302,7 @@ export class ApiFeatures {
       }
 
       if (typeof node === "string") {
-        if (this._shouldConvertToObjectId(key, node)) {
+        if (this.#isStrictObjectId(node) && this._shouldConvertToObjectId(key)) {
           return new ObjectId(node);
         }
 
@@ -326,20 +319,40 @@ export class ApiFeatures {
     return sanitizeNode(filters);
   }
 
-  _shouldConvertToObjectId(key, value) {
-    if (!this.#isStrictObjectId(value)) return false;
-
-    const normalized = String(key || "").replace(/^\$/, "").toLowerCase();
+  _shouldConvertToObjectId(key = "") {
+    const cleanKey = String(key).replace(/^\$/, "").toLowerCase();
 
     return (
-      normalized === "_id" ||
-      normalized === "id" ||
-      normalized.endsWith("id") ||
-      normalized === "$eq" ||
-      normalized === "$ne" ||
-      normalized === "$in" ||
-      normalized === "$nin"
+      cleanKey === "_id" ||
+      cleanKey === "id" ||
+      cleanKey.endsWith("id") ||
+      cleanKey === "eq" ||
+      cleanKey === "ne" ||
+      cleanKey === "in" ||
+      cleanKey === "nin"
     );
+  }
+
+  _deepMergeFilters(a = {}, b = {}) {
+    const out = { ...a };
+
+    for (const [key, value] of Object.entries(b)) {
+      if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        out[key] &&
+        typeof out[key] === "object" &&
+        !Array.isArray(out[key]) &&
+        !["$and", "$or", "$nor"].includes(key)
+      ) {
+        out[key] = this._deepMergeFilters(out[key], value);
+      } else {
+        out[key] = value;
+      }
+    }
+
+    return out;
   }
 
   _applySecurityFilters(filters = {}) {
@@ -371,11 +384,12 @@ export class ApiFeatures {
 
       if (typeof item === "string") {
         const trimmed = item.trim();
+
         if (!trimmed) return;
 
         if (trimmed.includes(".")) {
           const parts = trimmed.split(".").filter(Boolean);
-          let root = { path: parts[0] };
+          const root = { path: parts[0] };
           let current = root;
 
           for (const part of parts.slice(1)) {
@@ -418,21 +432,22 @@ export class ApiFeatures {
 
   _addPopulateStages({ model, populateItem, parentAlias, allowedPopulate }) {
     const path = populateItem.path;
+    const fullPath = parentAlias ? `${parentAlias}.${path}` : path;
 
-    if (!this._isPopulateAllowed(parentAlias ? `${parentAlias}.${path}` : path, allowedPopulate)) {
+    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
       return;
     }
 
     const info = this._getPopulateInfo(model, path, parentAlias);
 
-    const lookup = {
-      from: info.collection,
-      localField: info.localField,
-      foreignField: "_id",
-      as: info.as,
-    };
-
-    this.pipeline.push({ $lookup: lookup });
+    this.pipeline.push({
+      $lookup: {
+        from: info.collection,
+        localField: info.localField,
+        foreignField: "_id",
+        as: info.as,
+      },
+    });
 
     if (!info.isArray) {
       this.pipeline.push({
@@ -491,6 +506,7 @@ export class ApiFeatures {
     }
 
     const isArray = schemaPath.instance === "Array";
+
     const refModelName =
       schemaPath.options?.ref ||
       schemaPath.caster?.options?.ref ||
@@ -505,12 +521,11 @@ export class ApiFeatures {
     const refModel = this._resolveModel(refModelName, model);
 
     const as = parentAlias ? `${parentAlias}.${path}` : path;
-    const localField = as;
 
     return {
       refModel,
       collection: this._resolveCollectionName(refModelName, refModel),
-      localField,
+      localField: as,
       foreignField: "_id",
       as,
       isArray,
@@ -520,11 +535,7 @@ export class ApiFeatures {
   _resolveModel(refModelName, currentModel) {
     const connection = currentModel?.db || this.model?.db || mongoose.connection;
 
-    return (
-      connection.models?.[refModelName] ||
-      mongoose.models?.[refModelName] ||
-      null
-    );
+    return connection.models?.[refModelName] || mongoose.models?.[refModelName] || null;
   }
 
   _resolveCollectionName(refModelName, refModel) {
@@ -538,24 +549,27 @@ export class ApiFeatures {
   _buildPopulateProjection(select, alias) {
     const fields = String(select)
       .split(" ")
-      .map((f) => f.trim())
+      .map((field) => field.trim())
       .filter(Boolean);
 
-    const hasInclude = fields.some((f) => !f.startsWith("-"));
-    const hasExclude = fields.some((f) => f.startsWith("-"));
+    const hasInclude = fields.some((field) => !field.startsWith("-"));
+    const hasExclude = fields.some((field) => field.startsWith("-"));
 
     if (hasInclude && hasExclude) {
-      throw new HandleERROR("Cannot mix include and exclude in populate select", 400);
+      throw new HandleERROR(
+        "Cannot mix include and exclude in populate select",
+        400
+      );
     }
 
     const project = {};
 
     for (const field of fields) {
-      const clean = field.replace(/^-/, "");
+      const cleanField = field.replace(/^-/, "");
 
-      if (this._isForbiddenField(clean)) continue;
+      if (this._isForbiddenField(cleanField)) continue;
 
-      project[`${alias}.${clean}`] = field.startsWith("-") ? 0 : 1;
+      project[`${alias}.${cleanField}`] = field.startsWith("-") ? 0 : 1;
     }
 
     return project;
@@ -567,10 +581,6 @@ export class ApiFeatures {
       allowedPopulate.includes(path) ||
       allowedPopulate.includes(path.split(".")[0])
     );
-  }
-
-  _getValidSortableFields() {
-    return new Set(Object.keys(this.model.schema.paths));
   }
 
   _isForbiddenField(field) {
@@ -586,28 +596,6 @@ export class ApiFeatures {
         "$project" in stage
       );
     });
-  }
-
-  _deepMergeFilters(a = {}, b = {}) {
-    const out = { ...a };
-
-    for (const [key, value] of Object.entries(b)) {
-      if (
-        value &&
-        typeof value === "object" &&
-        !Array.isArray(value) &&
-        out[key] &&
-        typeof out[key] === "object" &&
-        !Array.isArray(out[key]) &&
-        !LOGICAL_OPERATORS.has(key)
-      ) {
-        out[key] = this._deepMergeFilters(out[key], value);
-      } else {
-        out[key] = value;
-      }
-    }
-
-    return out;
   }
 
   _escapeRegex(value) {
