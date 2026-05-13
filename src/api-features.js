@@ -704,43 +704,50 @@ export class ApiFeatures {
     return out;
   }
 
-  _sanitizeFilters(filters = {}) {
-    const sanitizeNode = (node, key = "") => {
-      if (node === null || node === "null") return null;
-      if (node === "true") return true;
-      if (node === "false") return false;
-
-      if (Array.isArray(node)) {
-        return node.map((item) => sanitizeNode(item, key));
-      }
-
-      if (node && typeof node === "object") {
-        const result = {};
-
-        for (const [childKey, childVal] of Object.entries(node)) {
-          result[childKey] = sanitizeNode(childVal, childKey);
-        }
-
-        return result;
-      }
-
-      if (typeof node === "string") {
-        if (this.#isStrictObjectId(node) && this._shouldConvertToObjectId(key)) {
-          return new ObjectId(node);
-        }
-
-        if (/^[0-9]+$/.test(node)) {
-          return node.length > 1 && node.startsWith("0")
-            ? node
-            : parseInt(node, 10);
-        }
-      }
-
+_sanitizeFilters(filters = {}) {
+  const sanitizeNode = (node, key = "") => {
+    if (
+      node instanceof mongoose.Types.ObjectId ||
+      node instanceof ObjectId
+    ) {
       return node;
-    };
+    }
 
-    return sanitizeNode(filters);
-  }
+    if (node === null || node === "null") return null;
+    if (node === "true") return true;
+    if (node === "false") return false;
+
+    if (Array.isArray(node)) {
+      return node.map((item) => sanitizeNode(item, key));
+    }
+
+    if (node && typeof node === "object") {
+      const result = {};
+
+      for (const [childKey, childVal] of Object.entries(node)) {
+        result[childKey] = sanitizeNode(childVal, childKey);
+      }
+
+      return result;
+    }
+
+    if (typeof node === "string") {
+      if (this.#isStrictObjectId(node) && this._shouldConvertToObjectId(key)) {
+        return new ObjectId(node);
+      }
+
+      if (/^[0-9]+$/.test(node)) {
+        return node.length > 1 && node.startsWith("0")
+          ? node
+          : parseInt(node, 10);
+      }
+    }
+
+    return node;
+  };
+
+  return sanitizeNode(filters);
+}
 
   _shouldConvertToObjectId(key = "") {
     const cleanKey = String(key).replace(/^\$/, "").toLowerCase();
