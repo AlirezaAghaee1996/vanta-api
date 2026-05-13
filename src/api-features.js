@@ -24,7 +24,6 @@ export class ApiFeatures {
     this.pipeline = [];
     this.manualFilters = {};
     this.useCursor = false;
-
     this.userRole =
       userRole && securityConfig.accessLevels?.[userRole] ? userRole : "guest";
 
@@ -33,10 +32,15 @@ export class ApiFeatures {
 
   filter() {
     const queryFilters = this._parseQueryFilters();
-    const mergedFilters = this._deepMergeFilters(
-      queryFilters,
+    const normalizedManualFilters = this._normalizeLogicalOperators(
       this.manualFilters
     );
+
+    const mergedFilters = this._deepMergeFilters(
+      queryFilters,
+      normalizedManualFilters
+    );
+
     const sanitizedFilters = this._sanitizeFilters(mergedFilters);
     const safeFilters = this._applySecurityFilters(sanitizedFilters);
 
@@ -49,7 +53,11 @@ export class ApiFeatures {
 
   addManualFilters(filters = {}) {
     if (filters && typeof filters === "object" && !Array.isArray(filters)) {
-      this.manualFilters = this._deepMergeFilters(this.manualFilters, filters);
+      const normalizedFilters = this._normalizeLogicalOperators(filters);
+      this.manualFilters = this._deepMergeFilters(
+        this.manualFilters,
+        normalizedFilters
+      );
     }
 
     return this;
@@ -57,11 +65,9 @@ export class ApiFeatures {
 
   search(fields = []) {
     const q = this.query.q;
-
     if (!q || !Array.isArray(fields) || !fields.length) return this;
 
     const safeQ = this._escapeRegex(String(q).trim());
-
     if (!safeQ) return this;
 
     const conditions = fields
@@ -109,7 +115,6 @@ export class ApiFeatures {
 
   limitFields(input = "") {
     const rawFields = [input, this.query.fields].filter(Boolean).join(",");
-
     if (!rawFields) return this;
 
     const fields = rawFields
@@ -128,9 +133,7 @@ export class ApiFeatures {
 
     for (const field of fields) {
       const cleanField = field.replace(/^-/, "");
-
       if (this._isForbiddenField(cleanField)) continue;
-
       project[cleanField] = field.startsWith("-") ? 0 : 1;
     }
 
@@ -205,7 +208,6 @@ export class ApiFeatures {
         });
 
         data = [];
-
         for await (const doc of cursor) {
           data.push(doc);
         }
@@ -225,440 +227,164 @@ export class ApiFeatures {
     }
   }
 
-  _addPopulateStages({
-    populateItem,
-    parentPath = "",
-    parentIsArray = false,
-    schema = null,
-    allowedPopulate = [],
-  }) {
-    if (!populateItem || !populateItem.path) return;
-
-    const path = populateItem.path;
-    const fullPath = parentPath ? `${parentPath}.${path}` : path;
-
-    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
-      return;
+  _normalizeLogicalOperators(filters = {}) {
+    if (Array.isArray(filters)) {
+      return filters.map((item) => this._normalizeLogicalOperators(item));
     }
 
-    const info = this._getPopulateInfo({
-      schema,
-      path,
-      fullPath,
-      parentPath,
-      parentIsArray,
-      populateItem,
-    });
+    if (!filters || typeof filters !== "object") return filters;
 
-    if (!parentIsArray) {
-      this.pipeline.push({
-        $lookup: {
-          from: info.collection,
-          localField: info.localField,
-          foreignField: "_id",
-          as: info.as,
-        },
-      });
+    if (
+      filters instanceof mongoose.Types.ObjectId ||
+      filters instanceof ObjectId ||
+      filters instanceof Date
+    ) {
+      return filters;
+    }
 
-      if (!info.isArray) {
-        this.pipeline.push({
-          $unwind: {
-            path: `$${info.as}`,
-            preserveNullAndEmptyArrays: true,
-          },
-        });
+    const out = {};
+
+    for (const [key, value] of Object.entries(filters)) {
+      const normalizedKey =
+        key === "and" ? "$and" : key === "or" ? "$or" : key === "nor" ? "$nor" : key;
+
+      out[normalizedKey] = this._normalizeLogicalOperators(value);
+    }
+
+    return out;
+  }
+
+  _sanitizeFilters(filters = {}) {
+    const sanitizeNode = (node, key = "", parentKey = "") => {
+      if (
+        node instanceof mongoose.Types.ObjectId ||
+        node instanceof ObjectId ||
+        node instanceof Date
+      ) {
+        return node;
       }
 
-      if (populateItem.populate) {
-        const nestedList = this._normalizeNestedPopulate(populateItem.populate);
+      if (node === null || node === "null") return null;
+      if (node === "true") return true;
+      if (node === "false") return false;
 
-        for (const nested of nestedList) {
-          this._addPopulateStages({
-            populateItem: nested,
-            parentPath: info.as,
-            parentIsArray: info.isArray,
-            schema: info.refSchema,
-            allowedPopulate,
-          });
+      if (Array.isArray(node)) {
+        return node.map((item) => sanitizeNode(item, key, parentKey));
+      }
+
+      if (node && typeof node === "object") {
+        const result = {};
+
+        for (const [childKey, childVal] of Object.entries(node)) {
+          result[childKey] = sanitizeNode(childVal, childKey, key);
+        }
+
+        return result;
+      }
+
+      if (typeof node === "string") {
+        if (
+          this.#isStrictObjectId(node) &&
+          this._shouldConvertToObjectId(key, parentKey)
+        ) {
+          return new ObjectId(node);
+        }
+
+        if (/^[0-9]+$/.test(node)) {
+          return node.length > 1 && node.startsWith("0")
+            ? node
+            : parseInt(node, 10);
         }
       }
 
-      if (populateItem.select) {
-        this._applyPopulateSelect({
-          path: info.as,
-          select: populateItem.select,
-          isArray: info.isArray,
-        });
-      }
-
-      return;
-    }
-
-    const tempLookupName = this._makeTempLookupName(fullPath);
-
-    this.pipeline.push({
-      $lookup: {
-        from: info.collection,
-        localField: info.localField,
-        foreignField: "_id",
-        as: tempLookupName,
-      },
-    });
-
-    this.pipeline.push({
-      $set: {
-        [parentPath]: {
-          $map: {
-            input: { $ifNull: [`$${parentPath}`, []] },
-            as: "item",
-            in: {
-              $mergeObjects: [
-                "$$item",
-                {
-                  [path]: {
-                    $first: {
-                      $filter: {
-                        input: `$${tempLookupName}`,
-                        as: "joined",
-                        cond: {
-                          $eq: ["$$joined._id", `$$item.${path}`],
-                        },
-                      },
-                    },
-                  },
-                },
-              ],
-            },
-          },
-        },
-      },
-    });
-
-    this.pipeline.push({ $unset: tempLookupName });
-
-    if (populateItem.populate) {
-      const nestedList = this._normalizeNestedPopulate(populateItem.populate);
-
-      for (const nested of nestedList) {
-        this._addNestedPopulateInsideArrayItem({
-          arrayPath: parentPath,
-          objectPath: path,
-          populateItem: nested,
-          allowedPopulate,
-          schema: info.refSchema,
-        });
-      }
-    }
-
-    if (populateItem.select) {
-      this._applyNestedObjectSelectInsideArray({
-        arrayPath: parentPath,
-        objectPath: path,
-        select: populateItem.select,
-      });
-    }
-  }
-
-  _addNestedPopulateInsideArrayItem({
-    arrayPath,
-    objectPath,
-    populateItem,
-    allowedPopulate = [],
-    schema = null,
-  }) {
-    if (!populateItem || !populateItem.path) return;
-
-    const childPath = populateItem.path;
-    const fullPath = `${arrayPath}.${objectPath}.${childPath}`;
-
-    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
-      return;
-    }
-
-    const info = this._getPopulateInfo({
-      schema,
-      path: childPath,
-      fullPath,
-      parentPath: `${arrayPath}.${objectPath}`,
-      parentIsArray: true,
-      populateItem,
-    });
-
-    const tempLookupName = this._makeTempLookupName(fullPath);
-
-    this.pipeline.push({
-      $lookup: {
-        from: info.collection,
-        localField: `${arrayPath}.${objectPath}.${childPath}`,
-        foreignField: "_id",
-        as: tempLookupName,
-      },
-    });
-
-    this.pipeline.push({
-      $set: {
-        [arrayPath]: {
-          $map: {
-            input: { $ifNull: [`$${arrayPath}`, []] },
-            as: "item",
-            in: {
-              $mergeObjects: [
-                "$$item",
-                {
-                  [objectPath]: {
-                    $cond: [
-                      { $ne: [`$$item.${objectPath}`, null] },
-                      {
-                        $mergeObjects: [
-                          `$$item.${objectPath}`,
-                          {
-                            [childPath]: {
-                              $first: {
-                                $filter: {
-                                  input: `$${tempLookupName}`,
-                                  as: "joined",
-                                  cond: {
-                                    $eq: [
-                                      "$$joined._id",
-                                      `$$item.${objectPath}.${childPath}`,
-                                    ],
-                                  },
-                                },
-                              },
-                            },
-                          },
-                        ],
-                      },
-                      `$$item.${objectPath}`,
-                    ],
-                  },
-                },
-              ],
-            },
-          },
-        },
-      },
-    });
-
-    this.pipeline.push({ $unset: tempLookupName });
-
-    if (populateItem.populate) {
-      const nestedList = this._normalizeNestedPopulate(populateItem.populate);
-
-      for (const nested of nestedList) {
-        this._addNestedPopulateInsideArrayItem({
-          arrayPath,
-          objectPath: `${objectPath}.${childPath}`,
-          populateItem: nested,
-          allowedPopulate,
-          schema: info.refSchema,
-        });
-      }
-    }
-
-    if (populateItem.select) {
-      this._applyNestedObjectSelectInsideArray({
-        arrayPath,
-        objectPath: `${objectPath}.${childPath}`,
-        select: populateItem.select,
-      });
-    }
-  }
-
-  _getPopulateInfo({
-    schema = null,
-    path,
-    fullPath,
-    parentPath = "",
-    parentIsArray = false,
-    populateItem = {},
-  }) {
-    const schemaPath = schema?.path?.(path);
-
-    const isArray =
-      populateItem.isArray === true ||
-      schemaPath?.instance === "Array" ||
-      Array.isArray(schemaPath?.options?.type);
-
-    const refModelName =
-      populateItem.ref ||
-      populateItem.modelName ||
-      schemaPath?.options?.ref ||
-      schemaPath?.caster?.options?.ref ||
-      (Array.isArray(schemaPath?.options?.type)
-        ? schemaPath.options.type[0]?.ref
-        : undefined) ||
-      this._inferModelNameFromPath(path);
-
-    const collection =
-      populateItem.collection ||
-      populateItem.from ||
-      this._resolveCollectionName(refModelName);
-
-    const refSchema = this._resolveRegisteredSchema(refModelName);
-
-    return {
-      path,
-      fullPath,
-      refModelName,
-      collection,
-      refSchema,
-      isArray,
-      localField: parentIsArray ? fullPath : fullPath,
-      as: fullPath,
-      parentPath,
-      parentIsArray,
+      return node;
     };
+
+    return sanitizeNode(filters);
   }
 
-  _applyPopulateSelect({ path, select, isArray }) {
-    const parsed = this._parseSelect(select);
+  _shouldConvertToObjectId(key = "", parentKey = "") {
+    const cleanKey = String(key).replace(/^\$/, "").toLowerCase();
+    const cleanParentKey = String(parentKey).replace(/^\$/, "").toLowerCase();
 
-    if (!parsed.fields.length) return;
-
-    if (parsed.mode === "exclude") {
-      this.pipeline.push({
-        $unset: parsed.fields.map((field) => `${path}.${field}`),
-      });
-      return;
+    if (
+      cleanKey === "_id" ||
+      cleanKey === "id" ||
+      cleanKey.endsWith("id") ||
+      cleanParentKey === "_id" ||
+      cleanParentKey === "id" ||
+      cleanParentKey.endsWith("id")
+    ) {
+      return true;
     }
 
-    const includeFields = this._ensureIdField(parsed.fields);
-
-    if (isArray) {
-      const selectedObject = {};
-
-      for (const field of includeFields) {
-        selectedObject[field] = `$$item.${field}`;
-      }
-
-      this.pipeline.push({
-        $set: {
-          [path]: {
-            $map: {
-              input: { $ifNull: [`$${path}`, []] },
-              as: "item",
-              in: selectedObject,
-            },
-          },
-        },
-      });
-
-      return;
-    }
-
-    const selectedObject = {};
-
-    for (const field of includeFields) {
-      selectedObject[field] = `$${path}.${field}`;
-    }
-
-    this.pipeline.push({
-      $set: {
-        [path]: {
-          $cond: [{ $ne: [`$${path}`, null] }, selectedObject, `$${path}`],
-        },
-      },
-    });
+    return (
+      ["eq", "ne", "in", "nin"].includes(cleanKey) &&
+      (cleanParentKey === "_id" ||
+        cleanParentKey === "id" ||
+        cleanParentKey.endsWith("id"))
+    );
   }
 
-  _applyNestedObjectSelectInsideArray({ arrayPath, objectPath, select }) {
-    const parsed = this._parseSelect(select);
+  _deepMergeFilters(a = {}, b = {}) {
+    const out = { ...a };
 
-    if (!parsed.fields.length) return;
-
-    if (parsed.mode === "exclude") {
-      this.pipeline.push({
-        $unset: parsed.fields.map(
-          (field) => `${arrayPath}.${objectPath}.${field}`
-        ),
-      });
-      return;
-    }
-
-    const includeFields = this._ensureIdField(parsed.fields);
-    const selectedObject = {};
-
-    for (const field of includeFields) {
-      selectedObject[field] = `$$item.${objectPath}.${field}`;
-    }
-
-    this.pipeline.push({
-      $set: {
-        [arrayPath]: {
-          $map: {
-            input: { $ifNull: [`$${arrayPath}`, []] },
-            as: "item",
-            in: {
-              $mergeObjects: [
-                "$$item",
-                {
-                  [objectPath]: {
-                    $cond: [
-                      { $ne: [`$$item.${objectPath}`, null] },
-                      selectedObject,
-                      `$$item.${objectPath}`,
-                    ],
-                  },
-                },
-              ],
-            },
-          },
-        },
-      },
-    });
-  }
-
-  _parseSelect(select = "") {
-    const fields = String(select)
-      .split(/\s+/)
-      .map((field) => field.trim())
-      .filter(Boolean)
-      .filter((field) => {
-        const cleanField = field.replace(/^-/, "");
-        return !this._isForbiddenField(cleanField);
-      });
-
-    const hasInclude = fields.some((field) => !field.startsWith("-"));
-    const hasExclude = fields.some((field) => field.startsWith("-"));
-
-    if (hasInclude && hasExclude) {
-      throw new HandleERROR(
-        "Cannot mix include and exclude in populate select",
-        400
-      );
-    }
-
-    return {
-      mode: hasExclude ? "exclude" : "include",
-      fields: fields.map((field) => field.replace(/^-/, "")),
-    };
-  }
-
-  _ensureIdField(fields = []) {
-    return fields.includes("_id") ? fields : ["_id", ...fields];
-  }
-
-  _sanitization() {
-    for (const key of Object.keys(this.query)) {
+    for (const [key, value] of Object.entries(b)) {
       if (
-        key.startsWith("$") ||
-        ["$where", "$accumulator", "$function"].includes(key)
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        out[key] &&
+        typeof out[key] === "object" &&
+        !Array.isArray(out[key]) &&
+        !LOGICAL_OPERATORS.includes(key)
       ) {
-        delete this.query[key];
+        out[key] = this._deepMergeFilters(out[key], value);
+      } else {
+        out[key] = value;
       }
     }
 
-    ["page", "limit"].forEach((field) => {
-      if (this.query[field] && !/^[0-9]+$/.test(String(this.query[field]))) {
-        throw new HandleERROR(`Invalid ${field}`, 400);
+    return out;
+  }
+
+  _applySecurityFilters(filters = {}) {
+    const cleanNode = (node) => {
+      if (
+        node instanceof mongoose.Types.ObjectId ||
+        node instanceof ObjectId ||
+        node instanceof Date
+      ) {
+        return node;
       }
-    });
+
+      if (Array.isArray(node)) {
+        return node.map(cleanNode);
+      }
+
+      if (!node || typeof node !== "object") {
+        return node;
+      }
+
+      const result = {};
+
+      for (const [key, value] of Object.entries(node)) {
+        if (this._isForbiddenField(key)) continue;
+        result[key] = cleanNode(value);
+      }
+
+      return result;
+    };
+
+    return cleanNode(filters);
+  }
+
+  _addPopulateStages(args) {
+    return ApiFeatures.prototype.__proto__?._addPopulateStages?.call(this, args);
   }
 
   _parseQueryFilters() {
     const obj = { ...this.query };
-
     RESERVED_QUERY_KEYS.forEach((key) => delete obj[key]);
 
     const out = {};
@@ -704,118 +430,22 @@ export class ApiFeatures {
     return out;
   }
 
-_sanitizeFilters(filters = {}) {
-  const sanitizeNode = (node, key = "") => {
-    if (
-      node instanceof mongoose.Types.ObjectId ||
-      node instanceof ObjectId
-    ) {
-      return node;
-    }
-
-    if (node === null || node === "null") return null;
-    if (node === "true") return true;
-    if (node === "false") return false;
-
-    if (Array.isArray(node)) {
-      return node.map((item) => sanitizeNode(item, key));
-    }
-
-    if (node && typeof node === "object") {
-      const result = {};
-
-      for (const [childKey, childVal] of Object.entries(node)) {
-        result[childKey] = sanitizeNode(childVal, childKey);
-      }
-
-      return result;
-    }
-
-    if (typeof node === "string") {
-      if (this.#isStrictObjectId(node) && this._shouldConvertToObjectId(key)) {
-        return new ObjectId(node);
-      }
-
-      if (/^[0-9]+$/.test(node)) {
-        return node.length > 1 && node.startsWith("0")
-          ? node
-          : parseInt(node, 10);
-      }
-    }
-
-    return node;
-  };
-
-  return sanitizeNode(filters);
-}
-
-  _shouldConvertToObjectId(key = "") {
-    const cleanKey = String(key).replace(/^\$/, "").toLowerCase();
-
-    return (
-      cleanKey === "_id" ||
-      cleanKey === "id" ||
-      cleanKey.endsWith("id") ||
-      cleanKey === "eq" ||
-      cleanKey === "ne" ||
-      cleanKey === "in" ||
-      cleanKey === "nin"
-    );
-  }
-
-  _deepMergeFilters(a = {}, b = {}) {
-    const out = { ...a };
-
-    for (const [key, value] of Object.entries(b)) {
+  _sanitization() {
+    for (const key of Object.keys(this.query)) {
       if (
-        value &&
-        typeof value === "object" &&
-        !Array.isArray(value) &&
-        out[key] &&
-        typeof out[key] === "object" &&
-        !Array.isArray(out[key]) &&
-        !LOGICAL_OPERATORS.includes(key)
+        key.startsWith("$") ||
+        ["$where", "$accumulator", "$function"].includes(key)
       ) {
-        out[key] = this._deepMergeFilters(out[key], value);
-      } else {
-        out[key] = value;
+        delete this.query[key];
       }
     }
 
-    return out;
+    ["page", "limit"].forEach((field) => {
+      if (this.query[field] && !/^[0-9]+$/.test(String(this.query[field]))) {
+        throw new HandleERROR(`Invalid ${field}`, 400);
+      }
+    });
   }
-
-_applySecurityFilters(filters = {}) {
-  const cleanNode = (node) => {
-    if (
-      node instanceof mongoose.Types.ObjectId ||
-      node instanceof ObjectId ||
-      node instanceof Date
-    ) {
-      return node;
-    }
-
-    if (Array.isArray(node)) {
-      return node.map(cleanNode);
-    }
-
-    if (!node || typeof node !== "object") {
-      return node;
-    }
-
-    const result = {};
-
-    for (const [key, value] of Object.entries(node)) {
-      if (this._isForbiddenField(key)) continue;
-
-      result[key] = cleanNode(value);
-    }
-
-    return result;
-  };
-
-  return cleanNode(filters);
-}
 
   _normalizePopulateInput(input = "") {
     const raw = [];
@@ -836,7 +466,6 @@ _applySecurityFilters(filters = {}) {
 
       if (typeof item === "string") {
         const trimmed = item.trim();
-
         if (!trimmed) return;
 
         if (trimmed.includes(".")) {
@@ -892,9 +521,11 @@ _applySecurityFilters(filters = {}) {
       return input
         .flatMap((item) => {
           if (typeof item === "string") return this._normalizePopulateInput(item);
+
           if (item && typeof item === "object" && item.path) {
             return [this._normalizePopulateObject(item)];
           }
+
           return [];
         })
         .filter(Boolean);
