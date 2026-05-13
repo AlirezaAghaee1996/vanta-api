@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import winston from "winston";
+import pluralize from "pluralize";
 import HandleERROR from "./handleError.js";
 import { securityConfig } from "./config.js";
 import { ObjectId } from "bson";
@@ -22,7 +23,6 @@ export class ApiFeatures {
     this.query = { ...query };
     this.pipeline = [];
     this.manualFilters = {};
-    this.populateOptions = [];
     this.useCursor = false;
 
     this.userRole =
@@ -161,11 +161,15 @@ export class ApiFeatures {
     const allowedPopulate =
       securityConfig.accessLevels?.[this.userRole]?.allowedPopulate || [];
 
-    const safePopulateList = populateList
-      .map((item) => this._sanitizePopulateOption(item, "", allowedPopulate))
-      .filter(Boolean);
-
-    this.populateOptions.push(...safePopulateList);
+    for (const populateItem of populateList) {
+      this._addPopulateStages({
+        populateItem,
+        parentPath: "",
+        parentIsArray: false,
+        schema: this.model.schema,
+        allowedPopulate,
+      });
+    }
 
     return this;
   }
@@ -176,10 +180,9 @@ export class ApiFeatures {
 
       if (options.debug) {
         logger.info("Pipeline:", this.pipeline);
-        logger.info("Populate:", this.populateOptions);
       }
 
-      if (this.pipeline.length > (securityConfig.maxPipelineStages || 50)) {
+      if (this.pipeline.length > (securityConfig.maxPipelineStages || 80)) {
         throw new HandleERROR("Too many pipeline stages", 400);
       }
 
@@ -212,10 +215,6 @@ export class ApiFeatures {
           .readConcern(options.readConcern || "majority");
       }
 
-      if (this.populateOptions.length) {
-        data = await this.model.populate(data, this.populateOptions);
-      }
-
       return {
         success: true,
         count: countResult?.total || 0,
@@ -224,6 +223,420 @@ export class ApiFeatures {
     } catch (err) {
       this._handleError(err);
     }
+  }
+
+  _addPopulateStages({
+    populateItem,
+    parentPath = "",
+    parentIsArray = false,
+    schema = null,
+    allowedPopulate = [],
+  }) {
+    if (!populateItem || !populateItem.path) return;
+
+    const path = populateItem.path;
+    const fullPath = parentPath ? `${parentPath}.${path}` : path;
+
+    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
+      return;
+    }
+
+    const info = this._getPopulateInfo({
+      schema,
+      path,
+      fullPath,
+      parentPath,
+      parentIsArray,
+      populateItem,
+    });
+
+    if (!parentIsArray) {
+      this.pipeline.push({
+        $lookup: {
+          from: info.collection,
+          localField: info.localField,
+          foreignField: "_id",
+          as: info.as,
+        },
+      });
+
+      if (!info.isArray) {
+        this.pipeline.push({
+          $unwind: {
+            path: `$${info.as}`,
+            preserveNullAndEmptyArrays: true,
+          },
+        });
+      }
+
+      if (populateItem.populate) {
+        const nestedList = this._normalizeNestedPopulate(populateItem.populate);
+
+        for (const nested of nestedList) {
+          this._addPopulateStages({
+            populateItem: nested,
+            parentPath: info.as,
+            parentIsArray: info.isArray,
+            schema: info.refSchema,
+            allowedPopulate,
+          });
+        }
+      }
+
+      if (populateItem.select) {
+        this._applyPopulateSelect({
+          path: info.as,
+          select: populateItem.select,
+          isArray: info.isArray,
+        });
+      }
+
+      return;
+    }
+
+    const tempLookupName = this._makeTempLookupName(fullPath);
+
+    this.pipeline.push({
+      $lookup: {
+        from: info.collection,
+        localField: info.localField,
+        foreignField: "_id",
+        as: tempLookupName,
+      },
+    });
+
+    this.pipeline.push({
+      $set: {
+        [parentPath]: {
+          $map: {
+            input: { $ifNull: [`$${parentPath}`, []] },
+            as: "item",
+            in: {
+              $mergeObjects: [
+                "$$item",
+                {
+                  [path]: {
+                    $first: {
+                      $filter: {
+                        input: `$${tempLookupName}`,
+                        as: "joined",
+                        cond: {
+                          $eq: ["$$joined._id", `$$item.${path}`],
+                        },
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    this.pipeline.push({ $unset: tempLookupName });
+
+    if (populateItem.populate) {
+      const nestedList = this._normalizeNestedPopulate(populateItem.populate);
+
+      for (const nested of nestedList) {
+        this._addNestedPopulateInsideArrayItem({
+          arrayPath: parentPath,
+          objectPath: path,
+          populateItem: nested,
+          allowedPopulate,
+          schema: info.refSchema,
+        });
+      }
+    }
+
+    if (populateItem.select) {
+      this._applyNestedObjectSelectInsideArray({
+        arrayPath: parentPath,
+        objectPath: path,
+        select: populateItem.select,
+      });
+    }
+  }
+
+  _addNestedPopulateInsideArrayItem({
+    arrayPath,
+    objectPath,
+    populateItem,
+    allowedPopulate = [],
+    schema = null,
+  }) {
+    if (!populateItem || !populateItem.path) return;
+
+    const childPath = populateItem.path;
+    const fullPath = `${arrayPath}.${objectPath}.${childPath}`;
+
+    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
+      return;
+    }
+
+    const info = this._getPopulateInfo({
+      schema,
+      path: childPath,
+      fullPath,
+      parentPath: `${arrayPath}.${objectPath}`,
+      parentIsArray: true,
+      populateItem,
+    });
+
+    const tempLookupName = this._makeTempLookupName(fullPath);
+
+    this.pipeline.push({
+      $lookup: {
+        from: info.collection,
+        localField: `${arrayPath}.${objectPath}.${childPath}`,
+        foreignField: "_id",
+        as: tempLookupName,
+      },
+    });
+
+    this.pipeline.push({
+      $set: {
+        [arrayPath]: {
+          $map: {
+            input: { $ifNull: [`$${arrayPath}`, []] },
+            as: "item",
+            in: {
+              $mergeObjects: [
+                "$$item",
+                {
+                  [objectPath]: {
+                    $cond: [
+                      { $ne: [`$$item.${objectPath}`, null] },
+                      {
+                        $mergeObjects: [
+                          `$$item.${objectPath}`,
+                          {
+                            [childPath]: {
+                              $first: {
+                                $filter: {
+                                  input: `$${tempLookupName}`,
+                                  as: "joined",
+                                  cond: {
+                                    $eq: [
+                                      "$$joined._id",
+                                      `$$item.${objectPath}.${childPath}`,
+                                    ],
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        ],
+                      },
+                      `$$item.${objectPath}`,
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    this.pipeline.push({ $unset: tempLookupName });
+
+    if (populateItem.populate) {
+      const nestedList = this._normalizeNestedPopulate(populateItem.populate);
+
+      for (const nested of nestedList) {
+        this._addNestedPopulateInsideArrayItem({
+          arrayPath,
+          objectPath: `${objectPath}.${childPath}`,
+          populateItem: nested,
+          allowedPopulate,
+          schema: info.refSchema,
+        });
+      }
+    }
+
+    if (populateItem.select) {
+      this._applyNestedObjectSelectInsideArray({
+        arrayPath,
+        objectPath: `${objectPath}.${childPath}`,
+        select: populateItem.select,
+      });
+    }
+  }
+
+  _getPopulateInfo({
+    schema = null,
+    path,
+    fullPath,
+    parentPath = "",
+    parentIsArray = false,
+    populateItem = {},
+  }) {
+    const schemaPath = schema?.path?.(path);
+
+    const isArray =
+      populateItem.isArray === true ||
+      schemaPath?.instance === "Array" ||
+      Array.isArray(schemaPath?.options?.type);
+
+    const refModelName =
+      populateItem.ref ||
+      populateItem.modelName ||
+      schemaPath?.options?.ref ||
+      schemaPath?.caster?.options?.ref ||
+      (Array.isArray(schemaPath?.options?.type)
+        ? schemaPath.options.type[0]?.ref
+        : undefined) ||
+      this._inferModelNameFromPath(path);
+
+    const collection =
+      populateItem.collection ||
+      populateItem.from ||
+      this._resolveCollectionName(refModelName);
+
+    const refSchema = this._resolveRegisteredSchema(refModelName);
+
+    return {
+      path,
+      fullPath,
+      refModelName,
+      collection,
+      refSchema,
+      isArray,
+      localField: parentIsArray ? fullPath : fullPath,
+      as: fullPath,
+      parentPath,
+      parentIsArray,
+    };
+  }
+
+  _applyPopulateSelect({ path, select, isArray }) {
+    const parsed = this._parseSelect(select);
+
+    if (!parsed.fields.length) return;
+
+    if (parsed.mode === "exclude") {
+      this.pipeline.push({
+        $unset: parsed.fields.map((field) => `${path}.${field}`),
+      });
+      return;
+    }
+
+    const includeFields = this._ensureIdField(parsed.fields);
+
+    if (isArray) {
+      const selectedObject = {};
+
+      for (const field of includeFields) {
+        selectedObject[field] = `$$item.${field}`;
+      }
+
+      this.pipeline.push({
+        $set: {
+          [path]: {
+            $map: {
+              input: { $ifNull: [`$${path}`, []] },
+              as: "item",
+              in: selectedObject,
+            },
+          },
+        },
+      });
+
+      return;
+    }
+
+    const selectedObject = {};
+
+    for (const field of includeFields) {
+      selectedObject[field] = `$${path}.${field}`;
+    }
+
+    this.pipeline.push({
+      $set: {
+        [path]: {
+          $cond: [{ $ne: [`$${path}`, null] }, selectedObject, `$${path}`],
+        },
+      },
+    });
+  }
+
+  _applyNestedObjectSelectInsideArray({ arrayPath, objectPath, select }) {
+    const parsed = this._parseSelect(select);
+
+    if (!parsed.fields.length) return;
+
+    if (parsed.mode === "exclude") {
+      this.pipeline.push({
+        $unset: parsed.fields.map(
+          (field) => `${arrayPath}.${objectPath}.${field}`
+        ),
+      });
+      return;
+    }
+
+    const includeFields = this._ensureIdField(parsed.fields);
+    const selectedObject = {};
+
+    for (const field of includeFields) {
+      selectedObject[field] = `$$item.${objectPath}.${field}`;
+    }
+
+    this.pipeline.push({
+      $set: {
+        [arrayPath]: {
+          $map: {
+            input: { $ifNull: [`$${arrayPath}`, []] },
+            as: "item",
+            in: {
+              $mergeObjects: [
+                "$$item",
+                {
+                  [objectPath]: {
+                    $cond: [
+                      { $ne: [`$$item.${objectPath}`, null] },
+                      selectedObject,
+                      `$$item.${objectPath}`,
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  }
+
+  _parseSelect(select = "") {
+    const fields = String(select)
+      .split(/\s+/)
+      .map((field) => field.trim())
+      .filter(Boolean)
+      .filter((field) => {
+        const cleanField = field.replace(/^-/, "");
+        return !this._isForbiddenField(cleanField);
+      });
+
+    const hasInclude = fields.some((field) => !field.startsWith("-"));
+    const hasExclude = fields.some((field) => field.startsWith("-"));
+
+    if (hasInclude && hasExclude) {
+      throw new HandleERROR(
+        "Cannot mix include and exclude in populate select",
+        400
+      );
+    }
+
+    return {
+      mode: hasExclude ? "exclude" : "include",
+      fields: fields.map((field) => field.replace(/^-/, "")),
+    };
+  }
+
+  _ensureIdField(fields = []) {
+    return fields.includes("_id") ? fields : ["_id", ...fields];
   }
 
   _sanitization() {
@@ -443,7 +856,7 @@ export class ApiFeatures {
     }
 
     if (typeof normalized.select === "string") {
-      normalized.select = this._sanitizeSelectString(normalized.select);
+      normalized.select = normalized.select.trim();
     }
 
     if (normalized.populate) {
@@ -454,7 +867,7 @@ export class ApiFeatures {
   }
 
   _normalizeNestedPopulate(input) {
-    if (!input) return undefined;
+    if (!input) return [];
 
     if (typeof input === "string") {
       return this._normalizePopulateInput(input);
@@ -473,14 +886,17 @@ export class ApiFeatures {
     }
 
     if (typeof input === "object" && input.path) {
-      return this._normalizePopulateObject(input);
+      return [this._normalizePopulateObject(input)];
     }
 
-    return undefined;
+    return [];
   }
 
   _dotPathToPopulate(path) {
-    const parts = path.split(".").map((p) => p.trim()).filter(Boolean);
+    const parts = path
+      .split(".")
+      .map((part) => part.trim())
+      .filter(Boolean);
 
     const root = { path: parts[0] };
     let current = root;
@@ -515,88 +931,22 @@ export class ApiFeatures {
     const merged = { ...a, ...b };
 
     if (a.populate || b.populate) {
-      const aList = this._populateToArray(a.populate);
-      const bList = this._populateToArray(b.populate);
+      const aList = Array.isArray(a.populate)
+        ? a.populate
+        : a.populate
+          ? [a.populate]
+          : [];
+
+      const bList = Array.isArray(b.populate)
+        ? b.populate
+        : b.populate
+          ? [b.populate]
+          : [];
+
       merged.populate = this._dedupePopulate([...aList, ...bList]);
     }
 
     return merged;
-  }
-
-  _populateToArray(populate) {
-    if (!populate) return [];
-    return Array.isArray(populate) ? populate : [populate];
-  }
-
-  _sanitizePopulateOption(item, parentPath = "", allowedPopulate = []) {
-    if (!item || typeof item !== "object" || !item.path) return null;
-
-    const fullPath = parentPath ? `${parentPath}.${item.path}` : item.path;
-
-    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
-      return null;
-    }
-
-    const sanitized = {
-      path: item.path,
-    };
-
-    if (item.select) {
-      sanitized.select = this._sanitizeSelectString(item.select);
-    }
-
-    if (item.match && typeof item.match === "object") {
-      sanitized.match = this._applySecurityFilters(
-        this._sanitizeFilters(item.match)
-      );
-    }
-
-    if (item.options && typeof item.options === "object") {
-      sanitized.options = item.options;
-    }
-
-    if (item.model) {
-      sanitized.model = item.model;
-    }
-
-    if (item.populate) {
-      const nested = this._populateToArray(item.populate)
-        .map((child) =>
-          this._sanitizePopulateOption(child, fullPath, allowedPopulate)
-        )
-        .filter(Boolean);
-
-      if (nested.length === 1) {
-        sanitized.populate = nested[0];
-      } else if (nested.length > 1) {
-        sanitized.populate = nested;
-      }
-    }
-
-    return sanitized;
-  }
-
-  _sanitizeSelectString(select = "") {
-    const fields = String(select)
-      .split(/\s+/)
-      .map((field) => field.trim())
-      .filter(Boolean)
-      .filter((field) => {
-        const cleanField = field.replace(/^-/, "");
-        return !this._isForbiddenField(cleanField);
-      });
-
-    const hasInclude = fields.some((field) => !field.startsWith("-"));
-    const hasExclude = fields.some((field) => field.startsWith("-"));
-
-    if (hasInclude && hasExclude) {
-      throw new HandleERROR(
-        "Cannot mix include and exclude in populate select",
-        400
-      );
-    }
-
-    return fields.join(" ");
   }
 
   _isPopulateAllowed(path, allowedPopulate = []) {
@@ -605,6 +955,36 @@ export class ApiFeatures {
       allowedPopulate.includes(path) ||
       allowedPopulate.includes(path.split(".")[0])
     );
+  }
+
+  _resolveCollectionName(refModelName = "") {
+    return pluralize(String(refModelName).toLowerCase());
+  }
+
+  _resolveRegisteredSchema(refModelName = "") {
+    const connection = this.model?.db || mongoose.connection;
+    const registeredModel =
+      connection.models?.[refModelName] || mongoose.models?.[refModelName];
+
+    return registeredModel?.schema || null;
+  }
+
+  _inferModelNameFromPath(path = "") {
+    let clean = String(path).split(".").pop();
+
+    clean = clean.replace(/Ids$/i, "");
+    clean = clean.replace(/Id$/i, "");
+    clean = pluralize.singular(clean);
+
+    return clean
+      .split(/[_-\s]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join("");
+  }
+
+  _makeTempLookupName(path = "") {
+    return `__vanta_lookup_${String(path).replace(/[^a-zA-Z0-9]/g, "_")}`;
   }
 
   _isForbiddenField(field) {
@@ -617,7 +997,11 @@ export class ApiFeatures {
         "$skip" in stage ||
         "$limit" in stage ||
         "$sort" in stage ||
-        "$project" in stage
+        "$project" in stage ||
+        "$lookup" in stage ||
+        "$unwind" in stage ||
+        "$set" in stage ||
+        "$unset" in stage
       );
     });
   }
