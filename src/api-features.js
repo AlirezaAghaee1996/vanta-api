@@ -1,6 +1,5 @@
 import mongoose from "mongoose";
 import winston from "winston";
-import pluralize from "pluralize";
 import HandleERROR from "./handleError.js";
 import { securityConfig } from "./config.js";
 import { ObjectId } from "bson";
@@ -15,6 +14,7 @@ const logger = winston.createLogger({
 });
 
 const RESERVED_QUERY_KEYS = ["page", "limit", "sort", "fields", "populate", "q"];
+const LOGICAL_OPERATORS = ["$and", "$or", "$nor"];
 
 export class ApiFeatures {
   constructor(model, query = {}, userRole = "") {
@@ -22,6 +22,7 @@ export class ApiFeatures {
     this.query = { ...query };
     this.pipeline = [];
     this.manualFilters = {};
+    this.populateOptions = [];
     this.useCursor = false;
 
     this.userRole =
@@ -32,7 +33,10 @@ export class ApiFeatures {
 
   filter() {
     const queryFilters = this._parseQueryFilters();
-    const mergedFilters = this._deepMergeFilters(queryFilters, this.manualFilters);
+    const mergedFilters = this._deepMergeFilters(
+      queryFilters,
+      this.manualFilters
+    );
     const sanitizedFilters = this._sanitizeFilters(mergedFilters);
     const safeFilters = this._applySecurityFilters(sanitizedFilters);
 
@@ -60,15 +64,19 @@ export class ApiFeatures {
 
     if (!safeQ) return this;
 
-    this.pipeline.push({
-      $match: {
-        $or: fields
-          .filter((field) => typeof field === "string" && field.trim())
-          .map((field) => ({
-            [field]: { $regex: safeQ, $options: "i" },
-          })),
-      },
-    });
+    const conditions = fields
+      .filter((field) => typeof field === "string" && field.trim())
+      .map((field) => ({
+        [field]: { $regex: safeQ, $options: "i" },
+      }));
+
+    if (conditions.length) {
+      this.pipeline.push({
+        $match: {
+          $or: conditions,
+        },
+      });
+    }
 
     return this;
   }
@@ -81,7 +89,7 @@ export class ApiFeatures {
 
     String(this.query.sort)
       .split(",")
-      .map((p) => p.trim())
+      .map((part) => part.trim())
       .filter(Boolean)
       .forEach((part) => {
         const direction = part.startsWith("-") ? -1 : 1;
@@ -153,14 +161,11 @@ export class ApiFeatures {
     const allowedPopulate =
       securityConfig.accessLevels?.[this.userRole]?.allowedPopulate || [];
 
-    for (const populateItem of populateList) {
-      this._addPopulateStages({
-        model: this.model,
-        populateItem,
-        parentAlias: "",
-        allowedPopulate,
-      });
-    }
+    const safePopulateList = populateList
+      .map((item) => this._sanitizePopulateOption(item, "", allowedPopulate))
+      .filter(Boolean);
+
+    this.populateOptions.push(...safePopulateList);
 
     return this;
   }
@@ -171,6 +176,7 @@ export class ApiFeatures {
 
       if (options.debug) {
         logger.info("Pipeline:", this.pipeline);
+        logger.info("Populate:", this.populateOptions);
       }
 
       if (this.pipeline.length > (securityConfig.maxPipelineStages || 50)) {
@@ -204,6 +210,10 @@ export class ApiFeatures {
         data = await aggregation
           .allowDiskUse(Boolean(options.allowDiskUse))
           .readConcern(options.readConcern || "majority");
+      }
+
+      if (this.populateOptions.length) {
+        data = await this.model.populate(data, this.populateOptions);
       }
 
       return {
@@ -344,7 +354,7 @@ export class ApiFeatures {
         out[key] &&
         typeof out[key] === "object" &&
         !Array.isArray(out[key]) &&
-        !["$and", "$or", "$nor"].includes(key)
+        !LOGICAL_OPERATORS.includes(key)
       ) {
         out[key] = this._deepMergeFilters(out[key], value);
       } else {
@@ -356,13 +366,27 @@ export class ApiFeatures {
   }
 
   _applySecurityFilters(filters = {}) {
-    const clean = { ...filters };
+    const cleanNode = (node) => {
+      if (Array.isArray(node)) {
+        return node.map(cleanNode);
+      }
 
-    for (const field of securityConfig.forbiddenFields || []) {
-      delete clean[field];
-    }
+      if (!node || typeof node !== "object") {
+        return node;
+      }
 
-    return clean;
+      const result = {};
+
+      for (const [key, value] of Object.entries(node)) {
+        if (this._isForbiddenField(key)) continue;
+
+        result[key] = cleanNode(value);
+      }
+
+      return result;
+    };
+
+    return cleanNode(filters);
   }
 
   _normalizePopulateInput(input = "") {
@@ -388,16 +412,7 @@ export class ApiFeatures {
         if (!trimmed) return;
 
         if (trimmed.includes(".")) {
-          const parts = trimmed.split(".").filter(Boolean);
-          const root = { path: parts[0] };
-          let current = root;
-
-          for (const part of parts.slice(1)) {
-            current.populate = { path: part };
-            current = current.populate;
-          }
-
-          normalized.push(root);
+          normalized.push(this._dotPathToPopulate(trimmed));
         } else {
           normalized.push({ path: trimmed });
         }
@@ -411,7 +426,7 @@ export class ApiFeatures {
       }
 
       if (item && typeof item === "object" && item.path) {
-        normalized.push(item);
+        normalized.push(this._normalizePopulateObject(item));
       }
     };
 
@@ -420,137 +435,156 @@ export class ApiFeatures {
     return this._dedupePopulate(normalized);
   }
 
-  _dedupePopulate(items) {
-    const map = new Map();
+  _normalizePopulateObject(item) {
+    const normalized = { ...item };
 
-    for (const item of items) {
-      map.set(item.path, item);
+    if (typeof normalized.path === "string") {
+      normalized.path = normalized.path.trim();
     }
 
-    return [...map.values()];
-  }
-
-  _addPopulateStages({ model, populateItem, parentAlias, allowedPopulate }) {
-    const path = populateItem.path;
-    const fullPath = parentAlias ? `${parentAlias}.${path}` : path;
-
-    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
-      return;
+    if (typeof normalized.select === "string") {
+      normalized.select = this._sanitizeSelectString(normalized.select);
     }
 
-    const info = this._getPopulateInfo(model, path, parentAlias);
-
-    this.pipeline.push({
-      $lookup: {
-        from: info.collection,
-        localField: info.localField,
-        foreignField: "_id",
-        as: info.as,
-      },
-    });
-
-    if (!info.isArray) {
-      this.pipeline.push({
-        $unwind: {
-          path: `$${info.as}`,
-          preserveNullAndEmptyArrays: true,
-        },
-      });
+    if (normalized.populate) {
+      normalized.populate = this._normalizeNestedPopulate(normalized.populate);
     }
 
-    if (populateItem.select) {
-      const project = this._buildPopulateProjection(populateItem.select, info.as);
-
-      if (Object.keys(project).length) {
-        this.pipeline.push({ $project: project });
-      }
-    }
-
-    if (populateItem.populate) {
-      const nestedList = this._normalizeNestedPopulate(populateItem.populate);
-
-      for (const nested of nestedList) {
-        this._addPopulateStages({
-          model: info.refModel,
-          populateItem: nested,
-          parentAlias: info.as,
-          allowedPopulate,
-        });
-      }
-    }
+    return normalized;
   }
 
   _normalizeNestedPopulate(input) {
-    if (!input) return [];
-
-    if (Array.isArray(input)) {
-      return input.flatMap((item) => this._normalizeNestedPopulate(item));
-    }
+    if (!input) return undefined;
 
     if (typeof input === "string") {
       return this._normalizePopulateInput(input);
     }
 
+    if (Array.isArray(input)) {
+      return input
+        .flatMap((item) => {
+          if (typeof item === "string") return this._normalizePopulateInput(item);
+          if (item && typeof item === "object" && item.path) {
+            return [this._normalizePopulateObject(item)];
+          }
+          return [];
+        })
+        .filter(Boolean);
+    }
+
     if (typeof input === "object" && input.path) {
-      return [input];
+      return this._normalizePopulateObject(input);
     }
 
-    return [];
+    return undefined;
   }
 
-  _getPopulateInfo(model, path, parentAlias = "") {
-    const schemaPath = model.schema.path(path);
+  _dotPathToPopulate(path) {
+    const parts = path.split(".").map((p) => p.trim()).filter(Boolean);
 
-    if (!schemaPath) {
-      throw new HandleERROR(`Invalid populate path: ${path}`, 400);
+    const root = { path: parts[0] };
+    let current = root;
+
+    for (const part of parts.slice(1)) {
+      current.populate = { path: part };
+      current = current.populate;
     }
 
-    const isArray = schemaPath.instance === "Array";
+    return root;
+  }
 
-    const refModelName =
-      schemaPath.options?.ref ||
-      schemaPath.caster?.options?.ref ||
-      (Array.isArray(schemaPath.options?.type)
-        ? schemaPath.options.type[0]?.ref
-        : undefined);
+  _dedupePopulate(items) {
+    const map = new Map();
 
-    if (!refModelName) {
-      throw new HandleERROR(`Populate path has no ref: ${path}`, 400);
+    for (const item of items) {
+      if (!item?.path) continue;
+
+      if (!map.has(item.path)) {
+        map.set(item.path, item);
+        continue;
+      }
+
+      const existing = map.get(item.path);
+      map.set(item.path, this._mergePopulateOptions(existing, item));
     }
 
-    const refModel = this._resolveModel(refModelName, model);
+    return [...map.values()];
+  }
 
-    const as = parentAlias ? `${parentAlias}.${path}` : path;
+  _mergePopulateOptions(a, b) {
+    const merged = { ...a, ...b };
 
-    return {
-      refModel,
-      collection: this._resolveCollectionName(refModelName, refModel),
-      localField: as,
-      foreignField: "_id",
-      as,
-      isArray,
+    if (a.populate || b.populate) {
+      const aList = this._populateToArray(a.populate);
+      const bList = this._populateToArray(b.populate);
+      merged.populate = this._dedupePopulate([...aList, ...bList]);
+    }
+
+    return merged;
+  }
+
+  _populateToArray(populate) {
+    if (!populate) return [];
+    return Array.isArray(populate) ? populate : [populate];
+  }
+
+  _sanitizePopulateOption(item, parentPath = "", allowedPopulate = []) {
+    if (!item || typeof item !== "object" || !item.path) return null;
+
+    const fullPath = parentPath ? `${parentPath}.${item.path}` : item.path;
+
+    if (!this._isPopulateAllowed(fullPath, allowedPopulate)) {
+      return null;
+    }
+
+    const sanitized = {
+      path: item.path,
     };
-  }
 
-  _resolveModel(refModelName, currentModel) {
-    const connection = currentModel?.db || this.model?.db || mongoose.connection;
-
-    return connection.models?.[refModelName] || mongoose.models?.[refModelName] || null;
-  }
-
-  _resolveCollectionName(refModelName, refModel) {
-    if (refModel?.collection?.name) {
-      return refModel.collection.name;
+    if (item.select) {
+      sanitized.select = this._sanitizeSelectString(item.select);
     }
 
-    return pluralize(String(refModelName).toLowerCase());
+    if (item.match && typeof item.match === "object") {
+      sanitized.match = this._applySecurityFilters(
+        this._sanitizeFilters(item.match)
+      );
+    }
+
+    if (item.options && typeof item.options === "object") {
+      sanitized.options = item.options;
+    }
+
+    if (item.model) {
+      sanitized.model = item.model;
+    }
+
+    if (item.populate) {
+      const nested = this._populateToArray(item.populate)
+        .map((child) =>
+          this._sanitizePopulateOption(child, fullPath, allowedPopulate)
+        )
+        .filter(Boolean);
+
+      if (nested.length === 1) {
+        sanitized.populate = nested[0];
+      } else if (nested.length > 1) {
+        sanitized.populate = nested;
+      }
+    }
+
+    return sanitized;
   }
 
-  _buildPopulateProjection(select, alias) {
+  _sanitizeSelectString(select = "") {
     const fields = String(select)
-      .split(" ")
+      .split(/\s+/)
       .map((field) => field.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((field) => {
+        const cleanField = field.replace(/^-/, "");
+        return !this._isForbiddenField(cleanField);
+      });
 
     const hasInclude = fields.some((field) => !field.startsWith("-"));
     const hasExclude = fields.some((field) => field.startsWith("-"));
@@ -562,17 +596,7 @@ export class ApiFeatures {
       );
     }
 
-    const project = {};
-
-    for (const field of fields) {
-      const cleanField = field.replace(/^-/, "");
-
-      if (this._isForbiddenField(cleanField)) continue;
-
-      project[`${alias}.${cleanField}`] = field.startsWith("-") ? 0 : 1;
-    }
-
-    return project;
+    return fields.join(" ");
   }
 
   _isPopulateAllowed(path, allowedPopulate = []) {
