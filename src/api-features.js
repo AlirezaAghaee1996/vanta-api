@@ -785,29 +785,37 @@ _sanitizeFilters(filters = {}) {
     return out;
   }
 
-  _applySecurityFilters(filters = {}) {
-    const cleanNode = (node) => {
-      if (Array.isArray(node)) {
-        return node.map(cleanNode);
-      }
+_applySecurityFilters(filters = {}) {
+  const cleanNode = (node) => {
+    if (
+      node instanceof mongoose.Types.ObjectId ||
+      node instanceof ObjectId ||
+      node instanceof Date
+    ) {
+      return node;
+    }
 
-      if (!node || typeof node !== "object") {
-        return node;
-      }
+    if (Array.isArray(node)) {
+      return node.map(cleanNode);
+    }
 
-      const result = {};
+    if (!node || typeof node !== "object") {
+      return node;
+    }
 
-      for (const [key, value] of Object.entries(node)) {
-        if (this._isForbiddenField(key)) continue;
+    const result = {};
 
-        result[key] = cleanNode(value);
-      }
+    for (const [key, value] of Object.entries(node)) {
+      if (this._isForbiddenField(key)) continue;
 
-      return result;
-    };
+      result[key] = cleanNode(value);
+    }
 
-    return cleanNode(filters);
-  }
+    return result;
+  };
+
+  return cleanNode(filters);
+}
 
   _normalizePopulateInput(input = "") {
     const raw = [];
