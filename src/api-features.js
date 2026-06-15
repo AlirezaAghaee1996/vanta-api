@@ -1,9 +1,7 @@
-import mongoose from "mongoose";
 import winston from "winston";
 import pluralize from "pluralize";
 import HandleERROR from "./handleError.js";
 import { securityConfig } from "./config.js";
-import { ObjectId } from "bson";
 
 const logger = winston.createLogger({
   level: "info",
@@ -27,6 +25,7 @@ const LOGICAL_OPERATORS = ["$and", "$or", "$nor"];
 export class ApiFeatures {
   constructor(model, query = {}, userRole = "") {
     this.model = model;
+
     this.query = { ...query };
     this.pipeline = [];
     this.manualFilters = {};
@@ -39,34 +38,40 @@ export class ApiFeatures {
 
   filter() {
     const queryFilters = this._parseQueryFilters();
-
+    console.log("query", queryFilters);
     const normalizedManualFilters = this._normalizeLogicalOperators(
       this.manualFilters,
     );
+    console.log("normalizedManualFilters", normalizedManualFilters);
 
     const mergedFilters = this._deepMergeFilters(
       queryFilters,
       normalizedManualFilters,
     );
+    console.log("mergedFilters", mergedFilters);
 
     const sanitizedFilters = this._sanitizeFilters(mergedFilters);
+    console.log("sanitizedFilters", sanitizedFilters);
+
     const safeFilters = this._applySecurityFilters(sanitizedFilters);
+    console.log("safeFilters", safeFilters);
 
     if (Object.keys(safeFilters).length) {
       this.pipeline.push({ $match: safeFilters });
     }
-
     return this;
   }
 
   addManualFilters(filters = {}) {
+    console.log(filters);
     if (filters && typeof filters === "object" && !Array.isArray(filters)) {
       const normalizedFilters = this._normalizeLogicalOperators(filters);
-
+      console.log(normalizedFilters);
       this.manualFilters = this._deepMergeFilters(
         this.manualFilters,
         normalizedFilters,
       );
+      console.log(this.manualFilters);
     }
 
     return this;
@@ -204,7 +209,7 @@ export class ApiFeatures {
         ...countPipeline,
         { $count: "total" },
       ]);
-
+      console.log(this.pipeline);
       const aggregation = this.model
         .aggregate(this.pipeline)
         .option({ maxTimeMS: options.maxTimeMS || 10000 });
@@ -717,7 +722,7 @@ export class ApiFeatures {
 
   _sanitizeFilters(filters = {}) {
     const sanitizeNode = (node, key = "", parentKey = "") => {
-      if (node instanceof mongoose.Types.ObjectId || node instanceof ObjectId) {
+      if (node instanceof this.model.base.Types.ObjectId) {
         return node;
       }
 
@@ -738,13 +743,14 @@ export class ApiFeatures {
 
         return result;
       }
+      const ObjectId = this.model.base.Types.ObjectId;
 
       if (typeof node === "string") {
         if (
           this.#isStrictObjectId(node) &&
           this._shouldConvertToObjectId(key)
         ) {
-          return new mongoose.Types.ObjectId(node);
+          return new ObjectId(node);
         }
 
         if (/^[0-9]+$/.test(node)) {
@@ -782,8 +788,7 @@ export class ApiFeatures {
     if (
       !filters ||
       typeof filters !== "object" ||
-      filters instanceof mongoose.Types.ObjectId ||
-      filters instanceof ObjectId ||
+      filters instanceof this.model.base.Types.ObjectId ||
       filters instanceof Date
     ) {
       return filters;
@@ -831,11 +836,18 @@ export class ApiFeatures {
 
   _applySecurityFilters(filters = {}) {
     const cleanNode = (node) => {
+      if (
+        node instanceof this.model.base.Types.ObjectId ||
+        node instanceof Date
+      ) {
+        return node;
+      }
+
       if (Array.isArray(node)) {
         return node.map(cleanNode);
       }
 
-      if (!node || typeof node !== "object") {
+      if (node === null || typeof node !== "object") {
         return node;
       }
 
@@ -843,6 +855,7 @@ export class ApiFeatures {
 
       for (const [key, value] of Object.entries(node)) {
         if (this._isForbiddenField(key)) continue;
+
         result[key] = cleanNode(value);
       }
 
@@ -851,7 +864,6 @@ export class ApiFeatures {
 
     return cleanNode(filters);
   }
-
   _normalizePopulateInput(input = "") {
     const raw = [];
 
@@ -1014,9 +1026,15 @@ export class ApiFeatures {
   }
 
   _resolveRegisteredSchema(refModelName = "") {
-    const connection = this.model?.db || mongoose.connection;
-    const registeredModel =
-      connection.models?.[refModelName] || mongoose.models?.[refModelName];
+    const connection = this.model.db;
+
+    const registeredModel = connection?.models?.[refModelName] ?? null;
+
+    if (!registeredModel) {
+      throw new Error(
+        `Model "${refModelName}" not found in current connection`,
+      );
+    }
 
     return registeredModel?.schema || null;
   }
@@ -1063,10 +1081,12 @@ export class ApiFeatures {
   }
 
   #isStrictObjectId(id) {
+    const ObjectId = this.model.base.Types.ObjectId;
+
     return (
       typeof id === "string" &&
-      mongoose.Types.ObjectId.isValid(id) &&
-      new mongoose.Types.ObjectId(id).toString() === id
+      this.model.base.Types.ObjectId.isValid(id) &&
+      new ObjectId(id).toString() === id
     );
   }
 
