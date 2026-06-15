@@ -709,7 +709,7 @@ export class ApiFeatures {
   }
 
   _sanitizeFilters(filters = {}) {
-    const sanitizeNode = (node, key = "") => {
+    const sanitizeNode = (node, key = "", parentKey = "") => {
       if (node instanceof mongoose.Types.ObjectId || node instanceof ObjectId) {
         return node;
       }
@@ -719,14 +719,14 @@ export class ApiFeatures {
       if (node === "false") return false;
 
       if (Array.isArray(node)) {
-        return node.map((item) => sanitizeNode(item, key));
+        return node.map((item) => sanitizeNode(item, key, parentKey));
       }
 
       if (node && typeof node === "object") {
         const result = {};
 
         for (const [childKey, childVal] of Object.entries(node)) {
-          result[childKey] = sanitizeNode(childVal, childKey);
+          result[childKey] = sanitizeNode(childVal, childKey, key);
         }
 
         return result;
