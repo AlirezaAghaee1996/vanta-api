@@ -38,23 +38,18 @@ export class ApiFeatures {
 
   filter() {
     const queryFilters = this._parseQueryFilters();
-    console.log("query", queryFilters);
     const normalizedManualFilters = this._normalizeLogicalOperators(
       this.manualFilters,
     );
-    console.log("normalizedManualFilters", normalizedManualFilters);
 
     const mergedFilters = this._deepMergeFilters(
       queryFilters,
       normalizedManualFilters,
     );
-    console.log("mergedFilters", mergedFilters);
 
     const sanitizedFilters = this._sanitizeFilters(mergedFilters);
-    console.log("sanitizedFilters", sanitizedFilters);
 
     const safeFilters = this._applySecurityFilters(sanitizedFilters);
-    console.log("safeFilters", safeFilters);
 
     if (Object.keys(safeFilters).length) {
       this.pipeline.push({ $match: safeFilters });
@@ -63,15 +58,12 @@ export class ApiFeatures {
   }
 
   addManualFilters(filters = {}) {
-    console.log(filters);
     if (filters && typeof filters === "object" && !Array.isArray(filters)) {
       const normalizedFilters = this._normalizeLogicalOperators(filters);
-      console.log(normalizedFilters);
       this.manualFilters = this._deepMergeFilters(
         this.manualFilters,
         normalizedFilters,
       );
-      console.log(this.manualFilters);
     }
 
     return this;
@@ -209,7 +201,6 @@ export class ApiFeatures {
         ...countPipeline,
         { $count: "total" },
       ]);
-      console.log(this.pipeline);
       const aggregation = this.model
         .aggregate(this.pipeline)
         .option({ maxTimeMS: options.maxTimeMS || 10000 });
@@ -1025,19 +1016,58 @@ export class ApiFeatures {
     return pluralize(String(refModelName).toLowerCase());
   }
 
-  _resolveRegisteredSchema(refModelName = "") {
-    const connection = this.model.db;
+  _toPascalCase(str = "") {
+  return str
+    .replace(/[_\-\s]+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+}
 
-    const registeredModel = connection?.models?.[refModelName] ?? null;
+ _resolveRegisteredSchema(refModelName = "") {
+  const connection = this.model?.db;
 
-    if (!registeredModel) {
-      throw new Error(
-        `Model "${refModelName}" not found in current connection`,
-      );
-    }
-
-    return registeredModel?.schema || null;
+  if (!connection) {
+    throw new Error("Mongoose connection not found from current model");
   }
+
+  const singular = pluralize.singular(refModelName);
+
+  const candidates = [
+    refModelName,
+    singular,
+    this._toPascalCase(refModelName),
+    this._toPascalCase(singular),
+  ];
+
+  let registeredModel = null;
+
+  for (const name of candidates) {
+    if (connection.models?.[name]) {
+      registeredModel = connection.models[name];
+      break;
+    }
+  }
+
+  if (!registeredModel) {
+    registeredModel =
+      Object.values(connection.models || {}).find(
+        (m) =>
+          m.modelName?.toLowerCase() === refModelName.toLowerCase() ||
+          m.modelName?.toLowerCase() === singular.toLowerCase()
+      ) || null;
+  }
+
+  if (!registeredModel) {
+    throw new Error(
+      `Model "${refModelName}" not found in current connection`
+    );
+  }
+
+  return registeredModel.schema;
+}
+
 
   _inferModelNameFromPath(path = "") {
     let clean = String(path).split(".").pop();
