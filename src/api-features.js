@@ -9,12 +9,19 @@ const logger = winston.createLogger({
   level: "info",
   format: winston.format.combine(
     winston.format.timestamp(),
-    winston.format.json()
+    winston.format.json(),
   ),
   transports: [new winston.transports.Console()],
 });
 
-const RESERVED_QUERY_KEYS = ["page", "limit", "sort", "fields", "populate", "q"];
+const RESERVED_QUERY_KEYS = [
+  "page",
+  "limit",
+  "sort",
+  "fields",
+  "populate",
+  "q",
+];
 const LOGICAL_OPERATORS = ["$and", "$or", "$nor"];
 
 export class ApiFeatures {
@@ -34,12 +41,12 @@ export class ApiFeatures {
     const queryFilters = this._parseQueryFilters();
 
     const normalizedManualFilters = this._normalizeLogicalOperators(
-      this.manualFilters
+      this.manualFilters,
     );
 
     const mergedFilters = this._deepMergeFilters(
       queryFilters,
-      normalizedManualFilters
+      normalizedManualFilters,
     );
 
     const sanitizedFilters = this._sanitizeFilters(mergedFilters);
@@ -58,7 +65,7 @@ export class ApiFeatures {
 
       this.manualFilters = this._deepMergeFilters(
         this.manualFilters,
-        normalizedFilters
+        normalizedFilters,
       );
     }
 
@@ -153,7 +160,7 @@ export class ApiFeatures {
     const page = Math.max(parseInt(this.query.page, 10) || 1, 1);
     const limit = Math.min(
       Math.max(parseInt(this.query.limit, 10) || 10, 1),
-      maxLimit
+      maxLimit,
     );
 
     this.pipeline.push({ $skip: (page - 1) * limit }, { $limit: limit });
@@ -574,7 +581,7 @@ export class ApiFeatures {
     if (parsed.mode === "exclude") {
       this.pipeline.push({
         $unset: parsed.fields.map(
-          (field) => `${arrayPath}.${objectPath}.${field}`
+          (field) => `${arrayPath}.${objectPath}.${field}`,
         ),
       });
 
@@ -630,7 +637,7 @@ export class ApiFeatures {
     if (hasInclude && hasExclude) {
       throw new HandleERROR(
         "Cannot mix include and exclude in populate select",
-        400
+        400,
       );
     }
 
@@ -733,8 +740,11 @@ export class ApiFeatures {
       }
 
       if (typeof node === "string") {
-        if (this.#isStrictObjectId(node) && this._shouldConvertToObjectId(key)) {
-          return new ObjectId(node);
+        if (
+          this.#isStrictObjectId(node) &&
+          this._shouldConvertToObjectId(key)
+        ) {
+          return new mongoose.Types.ObjectId(node);
         }
 
         if (/^[0-9]+$/.test(node)) {
@@ -915,7 +925,8 @@ export class ApiFeatures {
     if (Array.isArray(input)) {
       return input
         .flatMap((item) => {
-          if (typeof item === "string") return this._normalizePopulateInput(item);
+          if (typeof item === "string")
+            return this._normalizePopulateInput(item);
 
           if (item && typeof item === "object" && item.path) {
             return [this._normalizePopulateObject(item)];
